@@ -153,6 +153,10 @@ impl LiveShake {
 
 pub(crate) struct CameraShakePlugin;
 
+/// Insert it to stop the shake emitters: a view that moves with the head must not be shaken.
+#[derive(Resource)]
+pub struct NoCameraShake;
+
 impl Plugin for CameraShakePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraShakes>()
@@ -163,7 +167,8 @@ impl Plugin for CameraShakePlugin {
                 Update,
                 (fire_shakes, fire_kit_shakes)
                     .in_set(WorldStage::Present)
-                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
+                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
+                    .run_if(not(resource_exists::<NoCameraShake>)),
             );
     }
 }

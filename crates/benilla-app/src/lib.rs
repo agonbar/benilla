@@ -187,6 +187,7 @@ mod world_backdrop;
 mod world_state;
 mod world_state_ui;
 
+use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
 
 // A launcher stamps the build id at compile time and hands it to [`run`] or [`run_with`];
@@ -198,20 +199,31 @@ pub use benilla_world::worldview::run as run_worldview;
 pub use bevy::app::AppExit;
 // A crate on top of benilla reads objects and interacts through these, with no protocol dependency.
 pub use benilla_protocol::{messages::ObjectType, ObjectFields};
+pub use camera_shake::NoCameraShake;
 pub use net::Objects;
 pub use target::Interact;
 
 /// Builds and runs the client app. `build` is the launcher's compile-time git stamp, passed in as
 /// data so the sha lives in the shim's fingerprint and a commit does not recompile this crate.
 pub fn run(build: BuildId) -> AppExit {
-    launch(build, None)
+    launch(build, None, Box::new(|group| group))
 }
 
 /// [`run`], plus `extend` adding a crate's own plugins: how a feature 1.12.1 lacks is built on top
 /// of benilla (`examples/extended_launcher.rs`), the build marked `extended` wherever it is named.
 /// `extend` gets the client fully built and runs before the probe fleet, which sees what it adds.
 pub fn run_with(build: BuildId, extend: impl FnOnce(&mut App)) -> AppExit {
-    launch(build, Some(Box::new(extend)))
+    launch(build, Some(Box::new(extend)), Box::new(|group| group))
+}
+
+/// [`run_with`], plus `group` rewriting the default plugin group before it is built: a crate that
+/// must replace a plugin of the group (OpenXR swaps `RenderPlugin`) cannot do it from `extend`.
+pub fn run_with_group(
+    build: BuildId,
+    group: impl FnOnce(PluginGroupBuilder) -> PluginGroupBuilder + 'static,
+    extend: impl FnOnce(&mut App),
+) -> AppExit {
+    launch(build, Some(Box::new(extend)), Box::new(group))
 }
 
 /// The state folder, `benilla-config/`, where a crate on top keeps its own files: an addon it ships
@@ -226,8 +238,11 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
 /// What a crate on top of benilla adds to the built app ([`run_with`]).
 type Extension<'a> = Box<dyn FnOnce(&mut App) + 'a>;
 
+/// What a crate on top of benilla does to the default plugin group ([`run_with_group`]).
+type GroupHook = Box<dyn FnOnce(PluginGroupBuilder) -> PluginGroupBuilder>;
+
 /// The one body behind [`run`] and [`run_with`], not generic, so a launcher compiles none of it.
-fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
+fn launch(build: BuildId, extend: Option<Extension<'_>>, group: GroupHook) -> AppExit {
     // `WOW_HOVER_LOG_REPORT=<csv>` and `WOW_CAPTURE=list` print and exit before any setup.
     if let Ok(path) = std::env::var("WOW_HOVER_LOG_REPORT") {
         dev::report_recorded_hover_log(&path);
@@ -335,7 +350,8 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.
 
-    app.add_plugins(benilla_world::boot::tuned_default_plugins(Window {
+    // The group goes through `group` before it is built ([`run_with_group`]).
+    app.add_plugins(group(benilla_world::boot::tuned_default_plugins(Window {
         title: "benilla".into(),
         // Born in the player's display mode (`gxWindow` read straight off `config.toml`) rather
         // than flipped into it at `Startup`, which would flash on every launch and, under
@@ -402,7 +418,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             bevy::window::WindowLevel::Normal
         },
         ..default()
-    }))
+    })))
     .add_plugins(benilla_world::thread_qos::ThreadQosPlugin)
     // Undoes winit's forced macOS app activation for background runs; the window-side half is the
     // `Window` above.

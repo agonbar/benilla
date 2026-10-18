@@ -4,7 +4,12 @@
 use benilla_app::BuildId;
 
 fn main() -> benilla_app::AppExit {
-    benilla_app::run(BuildId {
+    // With `--features vr` the client starts in the headset through OpenXR, and flat without one.
+    #[cfg(feature = "vr")]
+    let run = benilla_vr::run;
+    #[cfg(not(feature = "vr"))]
+    let run = benilla_app::run;
+    run(BuildId {
         version: env!("CARGO_PKG_VERSION"),
         describe: env!("BENILLA_GIT_DESCRIBE"),
         sha: env!("BENILLA_GIT_SHA"),
