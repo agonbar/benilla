@@ -1,0 +1,26 @@
+[package]
+name = "benilla-vr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stereo VR for benilla through OpenXR: a Bevy plugin on top of benilla-app, started with `benilla_vr::run`"
+
+[lints]
+workspace = true
+
+[features]
+# The instruments; the player build is `--no-default-features`.
+default = ["dev"]
+dev = ["benilla-app/dev"]
+
+[dependencies]
+# `default-features = false`, or a player build still gets benilla-app with `dev`.
+benilla-app = { path = "../benilla-app", default-features = false }
+benilla-world = { path = "../benilla-world", default-features = false }
+bevy.workspace = true
+# Vulkan only (the default feature). No `window_support`: it replaces benilla's `WindowPlugin`. The
+# loader is dlopened at runtime (`libopenxr_loader.so`), so the build needs no cmake.
+bevy_mod_openxr = "0.5"
+bevy_mod_xr = "0.5"
+# The types `bevy_mod_openxr` does not re-export (`ReferenceSpaceType`, `View`); its own version.
+openxr = "0.21.1"

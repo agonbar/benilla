@@ -85,6 +85,8 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("CustomCursorImage", Plumbing),
     ("InputPlugin", Plumbing),
     ("WinitPlugin", Plumbing),
+    // The VR plugin sets it continuous while a headset session runs; it carries no player input.
+    ("WinitSettings", Plumbing),
     ("InputSystems", Plumbing),
     ("Key", Plumbing),
     ("KeyCode", Plumbing),
