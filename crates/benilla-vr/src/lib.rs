@@ -10,10 +10,12 @@
 //!
 //! Without OpenXR (no loader, runtime or headset) [`run`] is the flat client.
 
+mod glare;
 mod panel;
 mod rig;
 
 use bevy::app::PluginGroupBuilder;
+use bevy::camera::visibility::VisibilitySystems;
 use bevy::camera::{CameraOutputMode, ManualTextureViewHandle, RenderTarget};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
@@ -22,6 +24,8 @@ use bevy::window::{PresentMode, PrimaryWindow};
 use bevy::winit::WinitSettings;
 
 use benilla_app::{AppExit, BuildId};
+
+use benilla_world::billboard::BillboardPlace;
 use benilla_world::ffx_glow::FfxGlow;
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::{CameraPoseSet, MsaaSetting, WorldCamera, NEARCLIP_DEFAULT};
@@ -42,6 +46,13 @@ use rig::Eye;
 /// The client with stereo VR: [`benilla_app::run_with_group`] with OpenXR around the default
 /// plugin group and the rig on top. Starts flat when OpenXR is unavailable.
 pub fn run(build: BuildId) -> AppExit {
+    // The retained static pass draws only into the `WorldCamera` view, which draws nothing here, so
+    // the buildings, trees and interior props would be missing in both eyes. Off, they take the
+    // per-view entity path. Read once when the plugin builds, so before the app does; an explicit
+    // `WOW_STATIC_GX` wins. It costs draw calls, and the flat fallback loses the pass too.
+    if std::env::var_os("WOW_STATIC_GX").is_none() {
+        std::env::set_var("WOW_STATIC_GX", "0");
+    }
     benilla_app::run_with_group(build, openxr_group, |app| {
         if matches!(
             app.world().get_resource::<XrState>(),
@@ -98,6 +109,13 @@ impl Plugin for VrPlugin {
                         .run_if(session_running),
                     pace_window,
                 ),
+            )
+            .add_systems(
+                PostUpdate,
+                glare::push_glares_out
+                    .after(BillboardPlace)
+                    .before(VisibilitySystems::CheckVisibility)
+                    .run_if(session_running),
             )
             .add_systems(
                 PostUpdate,
