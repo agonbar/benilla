@@ -10,6 +10,7 @@
 //!
 //! Without OpenXR (no loader, runtime or headset) [`run`] is the flat client.
 
+mod panel;
 mod rig;
 
 use bevy::app::PluginGroupBuilder;
@@ -82,6 +83,7 @@ impl Plugin for VrPlugin {
             .init_resource::<GamePose>()
             // Camera shake is off in VR: a view that moves with the head must not be shaken.
             .insert_resource(benilla_app::NoCameraShake)
+            .add_plugins(panel::PanelPlugin)
             .add_systems(XrSessionCreated, spawn_eyes)
             // Before the controller: the game's own pose goes back, so it never reads the head's.
             .add_systems(First, restore_game_pose)
@@ -225,7 +227,7 @@ fn sync_eyes(
 fn hand_over_to_eyes(
     frame: Option<Res<OxrFrameState>>,
     mut world: Query<&mut Camera, (With<WorldCamera>, Without<XrCamera>)>,
-    mut eyes: Query<&mut Camera, With<XrCamera>>,
+    mut eyes: Query<&mut Camera, (With<XrCamera>, Without<panel::PanelCamera>)>,
 ) {
     let Ok(mut world) = world.single_mut() else {
         return;
