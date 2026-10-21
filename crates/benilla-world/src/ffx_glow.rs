@@ -230,9 +230,9 @@ pub struct FfxWave {
     active: bool,
 }
 
-/// Insert it to keep the underwater screen warp unarmed: displacing the whole view is
-/// uncomfortable in a headset. Deviation: FFXGlowWave (`0x6cb1f0`) never arms with it present;
-/// the murk fog, the glow and the rest of the underwater look are untouched.
+/// Insert it to keep the underwater screen warp unarmed; the murk fog, the glow and the rest of
+/// the underwater look are untouched. Deviation: FFXGlowWave (`0x6cb1f0`) never arms under
+/// `NoScreenWarp`, because displacing the whole view is uncomfortable in a headset.
 #[derive(Resource)]
 pub struct NoScreenWarp;
 
