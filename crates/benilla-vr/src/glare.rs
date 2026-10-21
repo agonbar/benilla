@@ -11,7 +11,7 @@ use benilla_world::sun::CelestialMaterial;
 use benilla_world::view::{WorldCamera, CAM_FAR};
 
 /// Where the sun and moon discs sit (`sun/follow.rs`): the glares go to this distance.
-const SKY_DISTANCE: f32 = 0.85 * CAM_FAR;
+pub(super) const SKY_DISTANCE: f32 = 0.85 * CAM_FAR;
 
 /// Nearer than this from the head is a glare (12 units); the discs, stars and domes are
 /// kilometres out. A glare already moved is far past it, which is what makes the push idempotent.
@@ -19,7 +19,7 @@ const NEAR_BODY: f32 = 100.0;
 
 /// `placed` moved along its ray from `head` to [`SKY_DISTANCE`] and scaled to match, or `None`
 /// when it is not a near body.
-fn pushed_out(head: Vec3, placed: &Transform) -> Option<Transform> {
+pub(super) fn pushed_out(head: Vec3, placed: &Transform) -> Option<Transform> {
     let offset = placed.translation - head;
     let distance = offset.length();
     if !(1e-3..NEAR_BODY).contains(&distance) {
