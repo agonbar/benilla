@@ -209,6 +209,35 @@ impl Rig {
         out
     }
 
+    /// What `trace_cull` reports after `frame(cull, ..)`: the shortfall of the seated cull camera
+    /// against the views of `eyes`, in radians per axis.
+    fn short(&mut self, eyes: [openxr::View; 2]) -> (f32, f32) {
+        let world = self.app.world_mut();
+        let (t, p) = world
+            .query_filtered::<(&Transform, &Projection), With<WorldCamera>>()
+            .single(world)
+            .unwrap();
+        let Projection::Perspective(p) = p else {
+            panic!("not a perspective")
+        };
+        let fresh = eyes.each_ref().map(|v| {
+            let q = v.pose.orientation;
+            let pose = Transform {
+                translation: Vec3::new(v.pose.position.x, v.pose.position.y, v.pose.position.z),
+                rotation: Quat::from_xyzw(q.x, q.y, q.z, q.w),
+                scale: Vec3::ONE,
+            };
+            Eye {
+                pose: self.root.mul_transform(pose),
+                left: v.fov.angle_left,
+                right: v.fov.angle_right,
+                up: v.fov.angle_up,
+                down: v.fov.angle_down,
+            }
+        });
+        rig::shortfall(&fresh, t.rotation, p.fov, p.aspect_ratio)
+    }
+
     fn frustum_admits(&self, p: Vec3) -> bool {
         let seen = self.app.world().resource::<Seen>();
         seen.frustum.as_ref().is_some_and(|f| {
@@ -315,5 +344,50 @@ fn a_moving_head_is_covered_at_every_pitch_and_roll() {
                 cant / DEG
             );
         }
+    }
+}
+
+#[test]
+fn the_trace_measure_goes_above_zero_when_the_head_outruns_the_margin() {
+    for aspect in ASPECTS {
+        let mut rig = Rig::new(aspect);
+        let still = located(
+            Pose {
+                pitch: 0.0,
+                roll: 0.0,
+            },
+            0.0,
+        );
+        for _ in 0..3 {
+            rig.frame(still, still);
+        }
+        // The eyes drew one frame later at 2° of pitch: inside the margin, so under zero.
+        rig.frame(still, still);
+        let near = located(
+            Pose {
+                pitch: 2.0,
+                roll: 0.0,
+            },
+            0.0,
+        );
+        let (x, y) = rig.short(near);
+        assert!(
+            x < 0.0 && y < 0.0,
+            "aspect {aspect:.2}: {x} {y} inside the margin"
+        );
+        // A 40° snap between the located views and the drawn ones is past any margin.
+        let far = located(
+            Pose {
+                pitch: 40.0,
+                roll: 0.0,
+            },
+            0.0,
+        );
+        let (_, y) = rig.short(far);
+        assert!(
+            y > 10.0 * DEG,
+            "aspect {aspect:.2}: short y {:.1}° for a 40° snap",
+            y / DEG
+        );
     }
 }

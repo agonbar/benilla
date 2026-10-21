@@ -88,6 +88,16 @@ pub fn covering_fov_y(eyes: &[Eye; 2], head: Quat, aspect: f32, margin: f32) -> 
     2.0 * widen(y).max(widen(x) / aspect).atan()
 }
 
+/// How far, per axis in radians, the eyes see past a cull camera facing `cull` with vertical field
+/// of view `fov_y` at `aspect`: positive where an eye's view leaves the camera's. `eyes` and
+/// `cull` are in the same space.
+pub fn shortfall(eyes: &[Eye; 2], cull: Quat, fov_y: f32, aspect: f32) -> (f32, f32) {
+    let (x, y) = half_tans(eyes, cull);
+    let half_y = fov_y / 2.0;
+    let half_x = (half_y.tan() * aspect).atan();
+    (x.atan() - half_x, y.atan() - half_y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +213,29 @@ mod tests {
         // At 1:1 the vertical angle is then the horizontal one.
         let fov = covering_fov_y(&eyes, head_centre(&eyes).rotation, 1.0, 0.0);
         assert!((fov - 2.0 * (FRAC_PI_4 + cant)).abs() < 1e-4, "{fov}");
+    }
+
+    #[test]
+    fn the_shortfall_is_the_margin_for_a_still_head_and_positive_past_it() {
+        let fov = [-FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, -FRAC_PI_4];
+        let eyes = [eye(-0.03, fov), eye(0.03, fov)];
+        let margin = 3.0 * DEG;
+        let cull = covering_fov_y(&eyes, Quat::IDENTITY, 1.0, margin);
+        let (x, y) = shortfall(&eyes, Quat::IDENTITY, cull, 1.0);
+        assert!(
+            (x + margin).abs() < 1e-4 && (y + margin).abs() < 1e-4,
+            "{x} {y}"
+        );
+        // The eyes then turn 10° up and 5° left before the cull catches up.
+        let turned = Quat::from_euler(EulerRot::YXZ, 5.0 * DEG, 10.0 * DEG, 0.0);
+        let moved = eyes.map(|e| Eye {
+            pose: Transform::from_rotation(turned).mul_transform(e.pose),
+            ..e
+        });
+        let (x, y) = shortfall(&moved, Quat::IDENTITY, cull, 1.0);
+        // At least the turn less the margin; a corner of a pitched pyramid gains on both axes.
+        assert!(x > 2.0 * DEG && x < 9.0 * DEG, "{}", x / DEG);
+        assert!(y > 7.0 * DEG && y < 12.0 * DEG, "{}", y / DEG);
     }
 
     #[test]

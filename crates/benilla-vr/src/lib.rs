@@ -133,6 +133,12 @@ impl Plugin for CullCameraPlugin {
                         .run_if(session_running),
                 ),
             );
+        if std::env::var_os("WOW_VR_CULL_TRACE").is_some() {
+            app.add_systems(
+                PostUpdate,
+                trace_cull.after(update_views).run_if(session_running),
+            );
+        }
     }
 }
 
@@ -200,7 +206,6 @@ fn seat_head(
     mut root: Query<&mut Transform, (With<XrTrackingRoot>, Without<WorldCamera>)>,
     mut camera: Query<(&mut Transform, &mut Projection), With<WorldCamera>>,
     mut turned: Local<Option<Quat>>,
-    mut trace: Local<Option<bool>>,
 ) {
     let (Some(eyes), Ok((mut transform, mut projection)), Ok(mut root)) =
         (views.0, camera.single_mut(), root.single_mut())
@@ -224,19 +229,40 @@ fn seat_head(
     );
     let aspect = perspective.aspect_ratio;
     perspective.fov = rig::covering_fov_y(&eyes, head.rotation, aspect, margin).max(game_fov);
-
-    if *trace.get_or_insert_with(|| std::env::var_os("WOW_VR_CULL_TRACE").is_some()) {
-        trace_cull(&eyes, head.rotation, perspective.fov, aspect, margin);
-    }
 }
 
-/// `WOW_VR_CULL_TRACE=1`: one line per frame with the eyes' four angles, what they need from the
-/// culling camera, and what it has. `short` is the angle the cull falls short of the eyes, per
-/// axis; it must never be above zero.
-fn trace_cull(eyes: &[Eye; 2], head: Quat, fov_y: f32, aspect: f32, margin: f32) {
+/// `WOW_VR_CULL_TRACE=1`: one line per frame, after the runtime has located this frame's views
+/// (`update_views`), comparing them with the culling camera `seat_head` seated in `Update` from
+/// the views located a frame earlier. `short` is the angle, per axis, that an eye sees past the
+/// cull; above zero is a frame where the culls miss something an eye draws. `worst` is the highest
+/// `short` since the session started, and 0 while it has never been above zero.
+fn trace_cull(
+    openxr: Option<Res<OxrViews>>,
+    root: Query<&Transform, (With<XrTrackingRoot>, Without<WorldCamera>)>,
+    camera: Query<(&Transform, &Projection), With<WorldCamera>>,
+    game: Res<GamePose>,
+    mut worst: Local<(f32, f32)>,
+) {
+    let (Some(openxr), Ok(root), Ok((cull, Projection::Perspective(p)))) =
+        (openxr, root.single(), camera.single())
+    else {
+        return;
+    };
+    // The game's own pose held means the head's is on the camera this frame.
+    let ([l, r, ..], Some(_)) = (openxr.as_slice(), game.0) else {
+        return;
+    };
     let deg = f32::to_degrees;
-    let (need_x, need_y) = rig::half_tans(eyes, head);
-    let (half_y, half_x) = (fov_y / 2.0, ((fov_y / 2.0).tan() * aspect).atan());
+    let fresh = [l, r].map(|v| Eye {
+        pose: root.mul_transform(v.pose.to_transform()),
+        left: v.fov.angle_left,
+        right: v.fov.angle_right,
+        up: v.fov.angle_up,
+        down: v.fov.angle_down,
+    });
+    let (x, y) = rig::shortfall(&fresh, cull.rotation, p.fov, p.aspect_ratio);
+    worst.0 = worst.0.max(x);
+    worst.1 = worst.1.max(y);
     let eye = |e: &Eye| {
         format!(
             "[L{:.1} R{:.1} U{:.1} D{:.1}]",
@@ -247,17 +273,16 @@ fn trace_cull(eyes: &[Eye; 2], head: Quat, fov_y: f32, aspect: f32, margin: f32)
         )
     };
     info!(
-        "vr cull: eyes {} {} need x{:.1} y{:.1} cull x{:.1} y{:.1} aspect {aspect:.3} margin {:.1} \
-         short x{:.1} y{:.1} (degrees)",
-        eye(&eyes[0]),
-        eye(&eyes[1]),
-        deg(need_x.atan()),
-        deg(need_y.atan()),
-        deg(half_x),
-        deg(half_y),
-        deg(margin),
-        deg(need_x.atan() - half_x),
-        deg(need_y.atan() - half_y),
+        "vr cull: eyes {} {} cull fov_y {:.1} aspect {:.3} short x{:.1} y{:.1} worst x{:.1} \
+         y{:.1} (degrees)",
+        eye(&fresh[0]),
+        eye(&fresh[1]),
+        deg(p.fov),
+        p.aspect_ratio,
+        deg(x),
+        deg(y),
+        deg(worst.0),
+        deg(worst.1),
     );
 }
 
