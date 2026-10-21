@@ -93,6 +93,9 @@ impl Plugin for VrPlugin {
         app
             // Camera shake is off in VR: a view that moves with the head must not be shaken.
             .insert_resource(benilla_app::NoCameraShake)
+            // The underwater screen warp is off in VR: displacing the whole view is
+            // uncomfortable in a headset. The murk fog stays.
+            .insert_resource(benilla_world::ffx_glow::NoScreenWarp)
             .add_plugins((panel::PanelPlugin, CullCameraPlugin))
             .add_systems(XrSessionCreated, spawn_eyes)
             .add_systems(Update, pace_window)

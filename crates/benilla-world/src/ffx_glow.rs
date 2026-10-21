@@ -230,6 +230,12 @@ pub struct FfxWave {
     active: bool,
 }
 
+/// Insert it to keep the underwater screen warp unarmed: displacing the whole view is
+/// uncomfortable in a headset. Deviation: FFXGlowWave (`0x6cb1f0`) never arms with it present;
+/// the murk fog, the glow and the rest of the underwater look are untouched.
+#[derive(Resource)]
+pub struct NoScreenWarp;
+
 /// The phase periods (`[0xce89c4]`, `[0xce89c8]`), moduli of an integer millisecond clock.
 const WAVE_PERIOD_MS: [u64; 2] = [3174, 2805];
 
@@ -260,6 +266,7 @@ fn sync_wave(
     time: Res<Time>,
     live: Res<crate::schedule::WorldLive>,
     underwater: Option<Res<crate::liquid::Underwater>>,
+    no_warp: Option<Res<NoScreenWarp>>,
     mut wave: ResMut<FfxWave>,
     mut last_dump: Local<Option<u32>>,
 ) {
@@ -267,7 +274,7 @@ fn sync_wave(
     wave.phase1 = (ms % WAVE_PERIOD_MS[0]) as f32 / WAVE_PERIOD_MS[0] as f32;
     wave.phase2 = (ms % WAVE_PERIOD_MS[1]) as f32 / WAVE_PERIOD_MS[1] as f32;
     let verdict = underwater.map(|u| u.0);
-    wave.active = live.0 && verdict.is_some_and(|v| v.any());
+    wave.active = live.0 && verdict.is_some_and(|v| v.any()) && no_warp.is_none();
 
     // `WOW_WAVE_DUMP`: a 1 Hz line, warping or not, naming why not.
     if std::env::var_os("WOW_WAVE_DUMP").is_some() {
@@ -277,6 +284,7 @@ fn sync_wave(
                 (false, _) => "off — not in world (the reference's 0x467d00 half of the guard)",
                 (_, None) => "off — no submersion verdict resolved yet",
                 (_, Some(benilla_formats::Submersion::Dry)) => "off — the eye is dry",
+                (_, Some(_)) if no_warp.is_some() => "off — NoScreenWarp (headset comfort)",
                 (_, Some(_)) => "WARPING",
             };
             info!(
@@ -1510,6 +1518,29 @@ mod tests {
         let u = combine_uniform(0.5, on, living_glue(), &FfxGlow::WORLD, wet());
         assert!(blur_read(&u), "all three on, the glow pass runs");
         assert!(wave_armed(FfxState::Player, wet(), on));
+    }
+
+    /// With [`NoScreenWarp`] an eye in water leaves the wave unarmed; without it the wave arms.
+    #[test]
+    fn no_screen_warp_leaves_a_submerged_eye_unwarped() {
+        let run = |marker: bool| {
+            let mut app = App::new();
+            app.add_plugins(bevy::time::TimePlugin)
+                .insert_resource(crate::schedule::WorldLive(true))
+                .insert_resource(crate::liquid::Underwater(
+                    benilla_formats::Submersion::Water,
+                ))
+                .init_resource::<FfxWave>()
+                .add_systems(Update, sync_wave);
+            if marker {
+                app.insert_resource(NoScreenWarp);
+            }
+            app.update();
+            let wave = *app.world().resource::<FfxWave>();
+            wave_armed(FfxState::Player, wave, alive())
+        };
+        assert!(run(false), "without the marker the wave arms as before");
+        assert!(!run(true), "with the marker the wave stays unarmed");
     }
 
     /// Dry, the uniform's first row is the plain combine's and the node binds the dry pipeline.
