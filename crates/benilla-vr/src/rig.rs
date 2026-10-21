@@ -37,13 +37,65 @@ pub fn head_centre(eyes: &[Eye; 2]) -> Transform {
     }
 }
 
-/// The vertical field of view of a camera of `aspect` (width over height) at the head's centre
-/// that sees everything either eye sees. Parallel eyes are assumed, as the runtimes report them.
-pub fn covering_fov_y(eyes: &[Eye; 2], aspect: f32) -> f32 {
-    let half = |f: fn(&Eye) -> f32| eyes.iter().map(f).fold(0.0, f32::max);
-    let half_y = half(|e| e.up.tan().max(-e.down.tan()));
-    let half_x = half(|e| e.right.tan().max(-e.left.tan()));
-    2.0 * half_y.max(half_x / aspect).atan()
+/// Margin on every side of the eyes' view that the culling camera keeps at rest: the eyes sit
+/// 3 cm either side of the camera, 1.8° at one metre.
+pub const MARGIN_AT_REST: f32 = 3.0 * DEG;
+
+/// Frames of head motion the margin covers. The culls read the views the runtime located in the
+/// previous frame, and the readers of the `Frustum` component one frame before that; the eyes
+/// draw with views located again in the render world. The turn the last frame took stands in for
+/// the one to come.
+const LAG_FRAMES: f32 = 3.0;
+
+/// The most the margin grows: a hitch or a snap turn must not blow the cull open for good.
+const MARGIN_MAX: f32 = 25.0 * DEG;
+
+/// The widest half-angle the culling camera takes; past it the tangent runs away.
+const HALF_ANGLE_MAX: f32 = 85.0 * DEG;
+
+const DEG: f32 = std::f32::consts::PI / 180.0;
+
+/// The margin for a head that turned `turned` radians in the last frame.
+pub fn margin(turned: f32) -> f32 {
+    (MARGIN_AT_REST + LAG_FRAMES * turned).min(MARGIN_MAX)
+}
+
+/// The largest horizontal and vertical half-angle tangents of either eye's view, measured from
+/// the head's forward axis `head` (a rotation in tracking space). Each eye is a pyramid, so its
+/// corners hold the extremes; an eye turned in its pose (canted lenses) is counted at its turn.
+pub fn half_tans(eyes: &[Eye; 2], head: Quat) -> (f32, f32) {
+    let to_head = head.inverse();
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    for eye in eyes {
+        for tx in [eye.left.tan(), eye.right.tan()] {
+            for ty in [eye.down.tan(), eye.up.tan()] {
+                let dir = to_head * (eye.pose.rotation * Vec3::new(tx, ty, -1.0));
+                // A corner at or behind the head's plane has no finite tangent.
+                let ahead = (-dir.z).max(1e-3);
+                x = x.max(dir.x.abs() / ahead);
+                y = y.max(dir.y.abs() / ahead);
+            }
+        }
+    }
+    (x, y)
+}
+
+/// The vertical field of view of a camera of `aspect` (width over height) facing `head` that sees
+/// everything either eye sees, and `margin` radians more on every side.
+pub fn covering_fov_y(eyes: &[Eye; 2], head: Quat, aspect: f32, margin: f32) -> f32 {
+    let (x, y) = half_tans(eyes, head);
+    let widen = |tan: f32| (tan.atan() + margin).min(HALF_ANGLE_MAX).tan();
+    2.0 * widen(y).max(widen(x) / aspect).atan()
+}
+
+/// How far, per axis in radians, the eyes see past a cull camera facing `cull` with vertical field
+/// of view `fov_y` at `aspect`: positive where an eye's view leaves the camera's. `eyes` and
+/// `cull` are in the same space.
+pub fn shortfall(eyes: &[Eye; 2], cull: Quat, fov_y: f32, aspect: f32) -> (f32, f32) {
+    let (x, y) = half_tans(eyes, cull);
+    let half_y = fov_y / 2.0;
+    let half_x = (half_y.tan() * aspect).atan();
+    (x.atan() - half_x, y.atan() - half_y)
 }
 
 #[cfg(test)]
@@ -112,14 +164,14 @@ mod tests {
             eye(-0.03, [-FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, -FRAC_PI_4]),
             eye(0.03, [-FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, -FRAC_PI_4]),
         ];
-        assert!((covering_fov_y(&eyes, 1.0) - FRAC_PI_2).abs() < 1e-5);
+        assert!((covering_fov_y(&eyes, Quat::IDENTITY, 1.0, 0.0) - FRAC_PI_2).abs() < 1e-5);
         // Asymmetric: one eye looks further up, the other further down.
         let eyes = [
             eye(-0.03, [-0.5, 0.5, 0.9, -0.3]),
             eye(0.03, [-0.5, 0.5, 0.3, -0.9]),
         ];
         let want = 2.0 * 0.9f32.tan().atan();
-        assert!((covering_fov_y(&eyes, 1.0) - want).abs() < 1e-5);
+        assert!((covering_fov_y(&eyes, Quat::IDENTITY, 1.0, 0.0) - want).abs() < 1e-5);
     }
 
     #[test]
@@ -129,9 +181,67 @@ mod tests {
             eye(0.03, [-0.8, 1.0, 0.4, -0.4]),
         ];
         // Horizontal half-tangent tan(1.0) at 16:9 needs a taller vertical half than tan(0.4).
-        let fov = covering_fov_y(&eyes, 16.0 / 9.0);
+        let fov = covering_fov_y(&eyes, Quat::IDENTITY, 16.0 / 9.0, 0.0);
         let want = 2.0 * (1.0f32.tan() / (16.0 / 9.0)).atan();
         assert!((fov - want).abs() < 1e-5);
         assert!(fov > 2.0 * 0.4f32.tan().atan());
+    }
+
+    #[test]
+    fn the_margin_widens_every_side_by_its_angle() {
+        let eyes = [
+            eye(-0.03, [-FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, -FRAC_PI_4]),
+            eye(0.03, [-FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, -FRAC_PI_4]),
+        ];
+        let fov = covering_fov_y(&eyes, Quat::IDENTITY, 1.0, 0.1);
+        assert!((fov - (FRAC_PI_2 + 0.2)).abs() < 1e-5, "{fov}");
+    }
+
+    #[test]
+    fn canted_eyes_widen_the_view_by_their_cant() {
+        // Each eye 90° wide and turned 10° outward: the pair spans 110°, which 90° misses.
+        let cant = 10.0f32.to_radians();
+        let mut eyes = [
+            eye(-0.03, [-FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, -FRAC_PI_4]),
+            eye(0.03, [-FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, -FRAC_PI_4]),
+        ];
+        eyes[0].pose.rotation = Quat::from_rotation_y(cant);
+        eyes[1].pose.rotation = Quat::from_rotation_y(-cant);
+        let (x, _) = half_tans(&eyes, head_centre(&eyes).rotation);
+        let want = (FRAC_PI_4 + cant).tan();
+        assert!((x - want).abs() < 1e-4, "{x} against {want}");
+        // At 1:1 the vertical angle is then the horizontal one.
+        let fov = covering_fov_y(&eyes, head_centre(&eyes).rotation, 1.0, 0.0);
+        assert!((fov - 2.0 * (FRAC_PI_4 + cant)).abs() < 1e-4, "{fov}");
+    }
+
+    #[test]
+    fn the_shortfall_is_the_margin_for_a_still_head_and_positive_past_it() {
+        let fov = [-FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, -FRAC_PI_4];
+        let eyes = [eye(-0.03, fov), eye(0.03, fov)];
+        let margin = 3.0 * DEG;
+        let cull = covering_fov_y(&eyes, Quat::IDENTITY, 1.0, margin);
+        let (x, y) = shortfall(&eyes, Quat::IDENTITY, cull, 1.0);
+        assert!(
+            (x + margin).abs() < 1e-4 && (y + margin).abs() < 1e-4,
+            "{x} {y}"
+        );
+        // The eyes then turn 10° up and 5° left before the cull catches up.
+        let turned = Quat::from_euler(EulerRot::YXZ, 5.0 * DEG, 10.0 * DEG, 0.0);
+        let moved = eyes.map(|e| Eye {
+            pose: Transform::from_rotation(turned).mul_transform(e.pose),
+            ..e
+        });
+        let (x, y) = shortfall(&moved, Quat::IDENTITY, cull, 1.0);
+        // At least the turn less the margin; a corner of a pitched pyramid gains on both axes.
+        assert!(x > 2.0 * DEG && x < 9.0 * DEG, "{}", x / DEG);
+        assert!(y > 7.0 * DEG && y < 12.0 * DEG, "{}", y / DEG);
+    }
+
+    #[test]
+    fn the_margin_grows_with_the_turn_and_stops() {
+        assert_eq!(margin(0.0), MARGIN_AT_REST);
+        assert!(margin(0.02) > margin(0.01));
+        assert_eq!(margin(10.0), MARGIN_MAX);
     }
 }

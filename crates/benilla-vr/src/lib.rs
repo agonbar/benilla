@@ -90,26 +90,12 @@ pub struct VrPlugin;
 
 impl Plugin for VrPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Views>()
-            .init_resource::<GamePose>()
+        app
             // Camera shake is off in VR: a view that moves with the head must not be shaken.
             .insert_resource(benilla_app::NoCameraShake)
-            .add_plugins(panel::PanelPlugin)
+            .add_plugins((panel::PanelPlugin, CullCameraPlugin))
             .add_systems(XrSessionCreated, spawn_eyes)
-            // Before the controller: the game's own pose goes back, so it never reads the head's.
-            .add_systems(First, restore_game_pose)
-            .add_systems(
-                Update,
-                (
-                    read_views,
-                    seat_head
-                        .after(read_views)
-                        .after(WorldStage::Input)
-                        .before(CameraPoseSet)
-                        .run_if(session_running),
-                    pace_window,
-                ),
-            )
+            .add_systems(Update, pace_window)
             .add_systems(
                 PostUpdate,
                 glare::push_glares_out
@@ -123,6 +109,36 @@ impl Plugin for VrPlugin {
                     .before(update_views)
                     .run_if(session_running),
             );
+    }
+}
+
+/// The game camera carrying the head's pose and a field of view that covers both eyes, for the
+/// CPU culls that look through `WorldCamera`.
+struct CullCameraPlugin;
+
+impl Plugin for CullCameraPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Views>()
+            .init_resource::<GamePose>()
+            // Before the controller: the game's own pose goes back, so it never reads the head's.
+            .add_systems(First, restore_game_pose)
+            .add_systems(
+                Update,
+                (
+                    read_views,
+                    seat_head
+                        .after(read_views)
+                        .after(WorldStage::Input)
+                        .before(CameraPoseSet)
+                        .run_if(session_running),
+                ),
+            );
+        if std::env::var_os("WOW_VR_CULL_TRACE").is_some() {
+            app.add_systems(
+                PostUpdate,
+                trace_cull.after(update_views).run_if(session_running),
+            );
+        }
     }
 }
 
@@ -181,11 +197,15 @@ fn read_views(openxr: Option<Res<OxrViews>>, mut views: ResMut<Views>) {
 /// the CPU culls (portals, draw election, drift) that look through `WorldCamera`. The game's own
 /// pose is kept for [`restore_game_pose`]. The controller reads nothing of its camera's `Transform`
 /// back but the free-fly translation, which is why the restore must be exact.
+///
+/// The field of view covers both eyes and [`rig::margin`] more: these culls read the views the
+/// runtime located a frame ago, and the eyes draw with views located again for the frame itself.
 fn seat_head(
     views: Res<Views>,
     mut game: ResMut<GamePose>,
     mut root: Query<&mut Transform, (With<XrTrackingRoot>, Without<WorldCamera>)>,
     mut camera: Query<(&mut Transform, &mut Projection), With<WorldCamera>>,
+    mut turned: Local<Option<Quat>>,
 ) {
     let (Some(eyes), Ok((mut transform, mut projection)), Ok(mut root)) =
         (views.0, camera.single_mut(), root.single_mut())
@@ -199,8 +219,71 @@ fn seat_head(
     let (game_pose, game_fov) = *game.0.get_or_insert((*transform, perspective.fov));
 
     *root = rig::root_pose(&game_pose);
-    *transform = root.mul_transform(rig::head_centre(&eyes));
-    perspective.fov = rig::covering_fov_y(&eyes, perspective.aspect_ratio).max(game_fov);
+    let head = rig::head_centre(&eyes);
+    *transform = root.mul_transform(head);
+    // The turn since the last frame stands in for the one to come.
+    let margin = rig::margin(
+        turned
+            .replace(transform.rotation)
+            .map_or(0.0, |last| last.angle_between(transform.rotation)),
+    );
+    let aspect = perspective.aspect_ratio;
+    perspective.fov = rig::covering_fov_y(&eyes, head.rotation, aspect, margin).max(game_fov);
+}
+
+/// `WOW_VR_CULL_TRACE=1`: one line per frame, after the runtime has located this frame's views
+/// (`update_views`), comparing them with the culling camera `seat_head` seated in `Update` from
+/// the views located a frame earlier. `short` is the angle, per axis, that an eye sees past the
+/// cull; above zero is a frame where the culls miss something an eye draws. `worst` is the highest
+/// `short` since the session started, and 0 while it has never been above zero.
+fn trace_cull(
+    openxr: Option<Res<OxrViews>>,
+    root: Query<&Transform, (With<XrTrackingRoot>, Without<WorldCamera>)>,
+    camera: Query<(&Transform, &Projection), With<WorldCamera>>,
+    game: Res<GamePose>,
+    mut worst: Local<(f32, f32)>,
+) {
+    let (Some(openxr), Ok(root), Ok((cull, Projection::Perspective(p)))) =
+        (openxr, root.single(), camera.single())
+    else {
+        return;
+    };
+    // The game's own pose held means the head's is on the camera this frame.
+    let ([l, r, ..], Some(_)) = (openxr.as_slice(), game.0) else {
+        return;
+    };
+    let deg = f32::to_degrees;
+    let fresh = [l, r].map(|v| Eye {
+        pose: root.mul_transform(v.pose.to_transform()),
+        left: v.fov.angle_left,
+        right: v.fov.angle_right,
+        up: v.fov.angle_up,
+        down: v.fov.angle_down,
+    });
+    let (x, y) = rig::shortfall(&fresh, cull.rotation, p.fov, p.aspect_ratio);
+    worst.0 = worst.0.max(x);
+    worst.1 = worst.1.max(y);
+    let eye = |e: &Eye| {
+        format!(
+            "[L{:.1} R{:.1} U{:.1} D{:.1}]",
+            deg(e.left),
+            deg(e.right),
+            deg(e.up),
+            deg(e.down)
+        )
+    };
+    info!(
+        "vr cull: eyes {} {} cull fov_y {:.1} aspect {:.3} short x{:.1} y{:.1} worst x{:.1} \
+         y{:.1} (degrees)",
+        eye(&fresh[0]),
+        eye(&fresh[1]),
+        deg(p.fov),
+        p.aspect_ratio,
+        deg(x),
+        deg(y),
+        deg(worst.0),
+        deg(worst.1),
+    );
 }
 
 /// Gives the game camera back its own pose, before anything of the frame reads it.
@@ -288,6 +371,9 @@ fn pace_window(
         (false, None) => {}
     }
 }
+
+#[cfg(test)]
+mod cull_test;
 
 #[cfg(test)]
 mod tests {
