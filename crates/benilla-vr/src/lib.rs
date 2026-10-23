@@ -13,6 +13,7 @@
 mod glare;
 mod panel;
 mod rig;
+mod sky_trace;
 
 use bevy::app::PluginGroupBuilder;
 use bevy::camera::visibility::VisibilitySystems;
@@ -136,6 +137,15 @@ impl Plugin for CullCameraPlugin {
                         .run_if(session_running),
                 ),
             );
+        if std::env::var_os("WOW_VR_SKY_TRACE").is_some() {
+            app.add_systems(
+                PostUpdate,
+                sky_trace::trace_sky
+                    .after(glare::push_glares_out)
+                    .after(update_views)
+                    .run_if(session_running),
+            );
+        }
         if std::env::var_os("WOW_VR_CULL_TRACE").is_some() {
             app.add_systems(
                 PostUpdate,
