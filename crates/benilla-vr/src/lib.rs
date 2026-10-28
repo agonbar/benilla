@@ -47,6 +47,16 @@ use rig::Eye;
 /// The client with stereo VR: [`benilla_app::run_with_group`] with OpenXR around the default
 /// plugin group and the rig on top. Starts flat when OpenXR is unavailable.
 pub fn run(build: BuildId) -> AppExit {
+    run_with(build, |group| group, |_| {})
+}
+
+/// [`run`], plus a crate's own `group` hook after OpenXR's, and `extend` on the built app, which
+/// runs in the flat fallback too: the gamepad plays a headset build on a screen.
+pub fn run_with(
+    build: BuildId,
+    group: impl FnOnce(PluginGroupBuilder) -> PluginGroupBuilder + 'static,
+    extend: impl FnOnce(&mut App),
+) -> AppExit {
     // The retained static pass draws only into the `WorldCamera` view, which draws nothing here, so
     // the buildings, trees and interior props would be missing in both eyes. Off, they take the
     // per-view entity path. Read once when the plugin builds, so before the app does; an explicit
@@ -54,17 +64,22 @@ pub fn run(build: BuildId) -> AppExit {
     if std::env::var_os("WOW_STATIC_GX").is_none() {
         std::env::set_var("WOW_STATIC_GX", "0");
     }
-    benilla_app::run_with_group(build, openxr_group, |app| {
-        if matches!(
-            app.world().get_resource::<XrState>(),
-            Some(XrState::Unavailable) | None
-        ) {
-            // `OxrInitPlugin` has logged the OpenXR error that says which of the three it was.
-            info!("vr: OpenXR is unavailable (no loader, runtime or headset), running flat");
-        } else {
-            app.add_plugins(VrPlugin);
-        }
-    })
+    benilla_app::run_with_group(
+        build,
+        move |g| group(openxr_group(g)),
+        move |app| {
+            if matches!(
+                app.world().get_resource::<XrState>(),
+                Some(XrState::Unavailable) | None
+            ) {
+                // `OxrInitPlugin` has logged the OpenXR error that says which of the three it was.
+                info!("vr: OpenXR is unavailable (no loader, runtime or headset), running flat");
+            } else {
+                app.add_plugins(VrPlugin);
+            }
+            extend(app);
+        },
+    )
 }
 
 /// The default plugin group with OpenXR in front of the renderer. A seated (`LOCAL`) reference

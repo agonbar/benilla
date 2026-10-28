@@ -52,6 +52,15 @@ pub fn normalize_binding_key(key: &str) -> Option<String> {
     is_valid_binding_key(key).then(|| key.to_ascii_uppercase())
 }
 
+/// A check for key names a crate on top added to the reference's (a gamepad's `PAD1`); unset, the
+/// validator is the reference's alone.
+static EXTRA_KEY_CHECK: std::sync::OnceLock<fn(&str) -> bool> = std::sync::OnceLock::new();
+
+/// Let `check` pass key names beyond the reference's, after its arms. The first call wins.
+pub fn set_extra_key_check(check: fn(&str) -> bool) {
+    let _ = EXTRA_KEY_CHECK.set(check);
+}
+
 /// `IsValidBindingKeyString 0x4b7890`, arm for arm.
 fn is_valid_binding_key(key: &str) -> bool {
     // 1. Modifier prefixes, in any order and any number of times (`0x4b78a0`-`0x4b78d0`).
@@ -103,7 +112,8 @@ fn is_valid_binding_key(key: &str) -> bool {
         "MOUSEWHEELDOWN",
         "MOUSEWHEELUP",
     ];
-    NAMES.contains(&rest)
+    // 5. Not the reference's: a name a crate on top registered.
+    NAMES.contains(&rest) || EXTRA_KEY_CHECK.get().is_some_and(|check| check(rest))
 }
 
 /// One command a `Bindings.xml` declared.
@@ -651,6 +661,21 @@ mod tests {
 
     fn row(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| v.to_string()).collect()
+    }
+
+    /// With no crate on top registered, the validator is the reference's alone: a gamepad name is
+    /// refused by `SetBinding` and dropped from a stored set.
+    #[test]
+    fn a_name_nobody_registered_is_refused_as_in_the_reference() {
+        assert_eq!(super::normalize_binding_key("PAD1"), None);
+        assert_eq!(super::normalize_binding_key("SHIFT-PADLSHOULDER"), None);
+        assert_eq!(
+            super::normalize_binding_key("SHIFT-W").as_deref(),
+            Some("SHIFT-W")
+        );
+        let s = script();
+        s.run(r#"SetBinding("PAD1", "JUMP")"#).unwrap();
+        assert_eq!(rows(&s)[2], row(&["JUMP", "SPACE", "NUMPAD0"]));
     }
 
     #[test]

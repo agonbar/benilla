@@ -492,6 +492,7 @@ version = "0.2.0"
 dependencies = [
  "benilla-app",
  "benilla-buildstamp",
+ "benilla-input",
  "benilla-vr",
 ]
 
@@ -601,6 +602,18 @@ dependencies = [
  "clap",
  "glam 0.31.1",
  "image",
+]
+
+[[package]]
+name = "benilla-input"
+version = "0.2.0"
+dependencies = [
+ "benilla-app",
+ "benilla-formats",
+ "benilla-ui",
+ "bevy",
+ "serde",
+ "toml",
 ]
 
 [[package]]

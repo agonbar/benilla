@@ -1,0 +1,25 @@
+[package]
+name = "benilla-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Gamepad input for benilla: pads into one `PadState` and `PAD*` binding tokens, a plugin on top of benilla-app, started with `benilla_input::run`"
+
+[lints]
+workspace = true
+
+[features]
+# The instruments; the player build is `--no-default-features`.
+default = ["dev"]
+dev = ["benilla-app/dev"]
+
+[dependencies]
+# `default-features = false`, or a player build still gets benilla-app with `dev`.
+benilla-app = { path = "../benilla-app", default-features = false }
+benilla-ui = { path = "../benilla-ui" }
+bevy.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+benilla-formats = { path = "../benilla-formats" }
