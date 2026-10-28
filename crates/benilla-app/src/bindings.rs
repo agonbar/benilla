@@ -476,7 +476,7 @@ fn latch_and_dispatch(
     mut state: ResMut<BindingsState>,
     mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
     mut focus_lost: MessageReader<bevy::input::keyboard::KeyboardFocusLost>,
-    mut ext_input: MessageReader<BindingKeyInput>,
+    mut ext_input: Option<MessageReader<BindingKeyInput>>,
     cover: Option<Res<crate::loading_screen::LoadingScreen>>,
 ) {
     state.just.clear();
@@ -497,7 +497,7 @@ fn latch_and_dispatch(
     // the direction bits only, so the mouse pair and autorun survive) and the world enter behind
     // the loading cover (`0x5144c0`), which clears every bit. A key's latch meets them in the
     // stuck-latch sweep too, whose up-half runs the Stop.
-    if cover.is_some_and(|c| c.covering()) {
+    if cover.as_ref().is_some_and(|c| c.covering()) {
         state.held.clear();
     } else if focus_lost.read().count() > 0 {
         state
@@ -622,14 +622,19 @@ fn latch_and_dispatch(
     }
 
     // ── Extension inputs ── walk the UI frames as a key does, then run the chord's command; a
-    // focused box or a frame that took the press ends it there.
-    for ev in ext_input.read() {
+    // focused box or a frame that took the press ends it there. A press under the loading cover is
+    // dropped as a key's is (`input.rs`); a release still runs, so no latch outlives the cover.
+    let covered = cover.as_ref().is_some_and(|c| c.covering());
+    for ev in ext_input.iter_mut().flat_map(|r| r.read()) {
         let held = Held::Ext(ev.token);
         if !ev.pressed {
             release(&mut state, &mut script, held);
             if let Some(s) = script.as_mut() {
                 s.key_up(ev.token);
             }
+            continue;
+        }
+        if covered {
             continue;
         }
         let walk = script.as_mut().map(|s| s.key_down(ev.token));

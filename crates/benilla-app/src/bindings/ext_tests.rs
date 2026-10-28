@@ -234,3 +234,51 @@ fn a_pad_token_round_trips_through_the_diff_and_steals_its_key() {
     );
     assert!(table.contains(&("PADUNREGISTERED".into(), "GONE".into())));
 }
+
+#[test]
+fn the_validator_passes_a_registered_token_and_still_refuses_any_other() {
+    use benilla_ui::script::keybind::normalize_binding_key;
+    register();
+    assert_eq!(normalize_binding_key("PAD1").as_deref(), Some("PAD1"));
+    assert_eq!(
+        normalize_binding_key("ALT-SHIFT-PADLTRIGGER").as_deref(),
+        Some("ALT-SHIFT-PADLTRIGGER")
+    );
+    assert_eq!(normalize_binding_key("PADNOPE"), None);
+    // The reference's own refusals are unchanged.
+    assert_eq!(normalize_binding_key("scrolllock"), None);
+    assert_eq!(normalize_binding_key("SHIFT-W").as_deref(), Some("SHIFT-W"));
+}
+
+#[test]
+fn the_key_bindings_window_can_bind_a_pad_button() {
+    register();
+    let script = UiScript::new().expect("VM");
+    script.register_bindings(&benilla_ui::bindings_xml::parse(BINDINGS).expect("well-formed"));
+    script
+        .run(r#"SetBinding("PAD2", "TAP")"#)
+        .expect("SetBinding");
+    assert_eq!(
+        script
+            .eval::<String>(r#"return GetBindingAction("PAD2")"#)
+            .unwrap(),
+        "TAP"
+    );
+}
+
+#[test]
+fn a_press_under_the_loading_cover_is_dropped_and_a_release_still_runs() {
+    let mut app = harness(&[("PAD1", "HOLD")]);
+    app.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
+    send(&mut app, input("PAD1", true));
+    assert_eq!(lua_str(&app, "HOLD_LOG"), "");
+    assert_eq!(latched(&app), 0);
+    // A press from before the cover is released by its own up edge.
+    app.world_mut()
+        .remove_resource::<crate::loading_screen::LoadingScreen>();
+    send(&mut app, input("PAD1", true));
+    app.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
+    send(&mut app, input("PAD1", false));
+    assert_eq!(lua_str(&app, "HOLD_LOG"), "down;up;");
+    assert_eq!(latched(&app), 0);
+}

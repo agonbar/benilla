@@ -50,6 +50,7 @@ static EXT_TOKENS: std::sync::RwLock<Vec<&'static str>> = std::sync::RwLock::new
 /// a key. Tokens are upper case and contain no `-` or space. Register before the first bindings
 /// load, or a stored binding of the token is dropped as unpressable.
 pub fn register_key_tokens(tokens: &[&'static str]) {
+    benilla_ui::script::keybind::set_extra_key_check(|key| ext_token(key).is_some());
     let mut list = EXT_TOKENS.write().unwrap_or_else(|e| e.into_inner());
     for t in tokens {
         if !list.contains(t) {
