@@ -159,6 +159,7 @@ mod simplehtml;
 mod skills;
 mod slash;
 mod slider;
+pub mod snap;
 mod social;
 mod sound;
 mod spellbook;

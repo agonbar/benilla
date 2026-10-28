@@ -12,6 +12,11 @@
 //! emulate_shift = "PADLTRIGGER"   # held, the buttons press as SHIFT-<token>; "" is off
 //! emulate_ctrl = "PADRTRIGGER"
 //! emulate_alt = "both"       # "both": shift and ctrl held together press as ALT- alone
+//! presentation = "auto"      # "kbm" or "controller" pins what the bars show; auto follows input
+//! cursor_stick = "right"     # the stick that moves the cursor in cursor mode; "left" lets the
+//!                            # left stick move it too, and then no stick leaves cursor mode
+//! cursor_speed = 1100.0      # cursor pixels per second at full deflection
+//! ui_scale = "off"           # "deck" sets the UI scale for a 1280x800 screen, or a number
 //! ```
 
 use bevy::prelude::*;
@@ -40,6 +45,26 @@ pub enum Source {
     Both,
 }
 
+/// What the bars and prompts show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presentation {
+    /// Follows the last input that is not bare pointer motion.
+    Auto,
+    Kbm,
+    Controller,
+}
+
+/// The stick that moves the cursor in cursor mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorStick {
+    /// The camera stick. The left stick walks, which leaves cursor mode.
+    Right,
+    Left,
+}
+
+/// The UI scale `ui_scale = "deck"` sets, for the Deck's 1280x800 screen.
+pub const DECK_UI_SCALE: f32 = 1.1;
+
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct PadConfig {
     pub device: Device,
@@ -51,6 +76,11 @@ pub struct PadConfig {
     pub shift: Source,
     pub ctrl: Source,
     pub alt: Source,
+    pub presentation: Presentation,
+    pub cursor_stick: CursorStick,
+    pub cursor_speed: f32,
+    /// The `uiScale` to set at world entry, if the player asked for one.
+    pub ui_scale: Option<f32>,
 }
 
 impl Default for PadConfig {
@@ -65,6 +95,10 @@ impl Default for PadConfig {
             shift: Source::Token("PADLTRIGGER"),
             ctrl: Source::Token("PADRTRIGGER"),
             alt: Source::Both,
+            presentation: Presentation::Auto,
+            cursor_stick: CursorStick::Right,
+            cursor_speed: 1100.0,
+            ui_scale: None,
         }
     }
 }
@@ -81,6 +115,10 @@ struct File {
     emulate_shift: Option<String>,
     emulate_ctrl: Option<String>,
     emulate_alt: Option<String>,
+    presentation: Option<String>,
+    cursor_stick: Option<String>,
+    cursor_speed: Option<f32>,
+    ui_scale: Option<toml::Value>,
 }
 
 impl PadConfig {
@@ -140,6 +178,45 @@ impl PadConfig {
         );
         if let Some(v) = file.look_invert_y {
             cfg.look_invert_y = v;
+        }
+        range(
+            "cursor_speed",
+            file.cursor_speed,
+            10.0,
+            20_000.0,
+            &mut cfg.cursor_speed,
+        );
+        if let Some(t) = &file.presentation {
+            match t.to_ascii_lowercase().as_str() {
+                "auto" => cfg.presentation = Presentation::Auto,
+                "kbm" => cfg.presentation = Presentation::Kbm,
+                "controller" => cfg.presentation = Presentation::Controller,
+                _ => problems.push(format!(
+                    "pad.toml: presentation \"{t}\" is not auto, kbm or controller"
+                )),
+            }
+        }
+        if let Some(t) = &file.cursor_stick {
+            match t.to_ascii_lowercase().as_str() {
+                "right" => cfg.cursor_stick = CursorStick::Right,
+                "left" => cfg.cursor_stick = CursorStick::Left,
+                _ => problems.push(format!(
+                    "pad.toml: cursor_stick \"{t}\" is not right or left"
+                )),
+            }
+        }
+        match &file.ui_scale {
+            None => {}
+            Some(toml::Value::String(t)) if t.eq_ignore_ascii_case("off") => cfg.ui_scale = None,
+            Some(toml::Value::String(t)) if t.eq_ignore_ascii_case("deck") => {
+                cfg.ui_scale = Some(DECK_UI_SCALE)
+            }
+            Some(v) => match v.as_float().or_else(|| v.as_integer().map(|i| i as f64)) {
+                Some(n) if (0.5..=1.5).contains(&n) => cfg.ui_scale = Some(n as f32),
+                _ => problems.push(format!(
+                    "pad.toml: ui_scale {v} is not off, deck or a number from 0.5 to 1.5"
+                )),
+            },
         }
         for (name, text, out, allow_both) in [
             ("emulate_shift", &file.emulate_shift, &mut cfg.shift, false),
@@ -224,6 +301,25 @@ mod tests {
         assert_eq!(cfg.alt, Source::Token("PAD1"));
         assert_eq!(cfg.ctrl, PadConfig::default().ctrl);
         assert_eq!(problems.len(), 2, "{problems:?}");
+    }
+
+    #[test]
+    fn the_cursor_and_presentation_settings_parse() {
+        let (cfg, problems) = PadConfig::parse(
+            "presentation = \"Controller\"\ncursor_stick = \"left\"\ncursor_speed = 700\nui_scale = \"deck\"",
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(cfg.presentation, Presentation::Controller);
+        assert_eq!(cfg.cursor_stick, CursorStick::Left);
+        assert_eq!(cfg.cursor_speed, 700.0);
+        assert_eq!(cfg.ui_scale, Some(DECK_UI_SCALE));
+        assert_eq!(PadConfig::parse("ui_scale = 1").0.ui_scale, Some(1.0));
+        assert_eq!(PadConfig::parse("ui_scale = \"off\"").0.ui_scale, None);
+        let (cfg, problems) =
+            PadConfig::parse("presentation = \"x\"\ncursor_stick = \"up\"\nui_scale = 9");
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(cfg.presentation, Presentation::Auto);
+        assert_eq!(cfg.ui_scale, None);
     }
 
     #[test]

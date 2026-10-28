@@ -238,12 +238,10 @@ fn drive_mouseover_tooltip(
             .then(|| {
                 window.iter().next().and_then(|w| {
                     // The hover probe's aim stands in for a missing cursor; a real pointer wins.
-                    w.cursor_position()
-                        .or_else(crate::target::hover_probe_point)
-                        .map(|c| {
-                            let at = crate::ui_script::window_to_ui(w.height(), c);
-                            (at.x, at.y)
-                        })
+                    crate::pointer::ui_cursor(w).map(|c| {
+                        let at = crate::ui_script::window_to_ui(w.height(), c);
+                        (at.x, at.y)
+                    })
                 })
             })
             .flatten();

@@ -406,3 +406,28 @@ fn mouselook_start_under_a_left_drag_is_the_both_button_run() {
     assert_eq!(w.resource::<CameraControl>().look, Some(LookButton::Right));
     assert!(w.resource::<Messages<WorldClick>>().is_empty());
 }
+
+/// A pad's or a laser's cursor decides a world press as the mouse's does: inside the viewport it
+/// counts, outside it does not, and with none there is no press.
+#[test]
+fn a_virtual_cursor_is_in_the_viewport_by_its_physical_position() {
+    let camera = Camera {
+        viewport: Some(bevy::camera::Viewport {
+            physical_position: UVec2::new(100, 50),
+            physical_size: UVec2::new(200, 100),
+            ..default()
+        }),
+        ..default()
+    };
+    assert!(in_viewport(Some(Vec2::new(150.0, 60.0)), &camera));
+    assert!(!in_viewport(Some(Vec2::new(99.0, 60.0)), &camera));
+    assert!(
+        !in_viewport(Some(Vec2::new(150.0, 150.0)), &camera),
+        "max edge is out"
+    );
+    assert!(!in_viewport(None, &camera));
+    assert!(
+        in_viewport(Some(Vec2::ZERO), &Camera::default()),
+        "no viewport is the window"
+    );
+}

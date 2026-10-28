@@ -725,7 +725,7 @@ fn dev_map_jump(
     let (Some(script), Some(data), Ok(window)) = (script, data, windows.single()) else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
+    let Some(cursor) = crate::pointer::ui_cursor(window) else {
         return;
     };
     // Window px (y-down) to the VM's y-up root units, as the pointer feed converts them.

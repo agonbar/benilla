@@ -98,6 +98,11 @@ impl PadDevice {
         self.active
     }
 
+    /// Whether any pad is connected.
+    pub fn connected(&self) -> bool {
+        !self.pads.is_empty()
+    }
+
     /// The pads connected since the last call, for the trace.
     pub fn take_connects(&mut self) -> Vec<PadInfo> {
         std::mem::take(&mut self.connects)

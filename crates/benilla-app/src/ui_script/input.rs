@@ -129,8 +129,7 @@ pub(super) fn feed_ui_wheel(
     let window = window.single().ok();
     // The same cursor the mouse half feeds.
     let cursor = window.and_then(|w| {
-        w.cursor_position()
-            .or_else(crate::target::hover_probe_point)
+        crate::pointer::ui_cursor(w)
             .filter(|_| !(synthetic.0 || capture_pinned.0))
             .map(|c| super::window_to_ui(w.height(), c))
     });
@@ -216,11 +215,7 @@ pub(super) fn feed_ui_input(
     // ── Mouse ── A cursor off the window skips only the mouse feed.
     // The headless hover probe's aim stands in for a missing cursor, so `PointerOverUi` rises and
     // falls over a panel in an automated run as it does for a person; a real pointer always wins.
-    if let Some(cursor) = window
-        .cursor_position()
-        .or_else(crate::target::hover_probe_point)
-        .filter(|_| !synthetic)
-    {
+    if let Some(cursor) = crate::pointer::ui_cursor(window).filter(|_| !synthetic) {
         // The window cursor in the root's y-up 768-high units, as `GetCursorPosition` answers it.
         let Vec2 { x, y } = super::window_to_ui(window.height(), cursor);
         // `WOW_HIT_COST=1` meters this call's per-frame hit-test rebuild, one line a second.
