@@ -59,6 +59,16 @@ pub struct BindingKeyInput {
     pub shift: bool,
 }
 
+/// Whether the loading cover is up, for a crate on top that must start nothing behind it.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct CoverUp<'w>(Option<Res<'w, crate::loading_screen::LoadingScreen>>);
+
+impl CoverUp<'_> {
+    pub fn get(&self) -> bool {
+        self.0.as_ref().is_some_and(|c| c.covering())
+    }
+}
+
 /// Default bindings a crate on top adds to the player's `DefaultBindings.wtf`, so the stored sets
 /// are diffs against them and never carry them.
 static EXT_DEFAULTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());

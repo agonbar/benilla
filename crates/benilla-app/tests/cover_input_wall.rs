@@ -76,8 +76,24 @@ const VERDICTS: &[(&str, Verdict)] = &[
              window would warp it back in. Draining it would blind the gate to its own signal.",
         ),
     ),
+    (
+        "RawGamepadEvent",
+        Open(
+            "read by `benilla-input` into a pad state, which acts on nothing by itself: a pad \
+             press reaches the bindings only as `BindingKeyInput`, which `bindings.rs` drops under \
+             the cover, and the camera stick looks through `MouseMotion`, which the cover empties \
+             and which `benilla-input` does not write or open a look session for while it is up",
+        ),
+    ),
     // ── Not input at all ────────────────────────────────────────────────────────────────────
     ("ButtonState", Plumbing),
+    // Gamepad types `benilla-input` names; see the `RawGamepadEvent` row.
+    ("GamepadAxis", Plumbing),
+    ("GamepadButton", Plumbing),
+    ("GamepadConnection", Plumbing),
+    ("GamepadConnectionEvent", Plumbing),
+    ("RawGamepadAxisChangedEvent", Plumbing),
+    ("RawGamepadButtonChangedEvent", Plumbing),
     // Cursor outputs benilla writes; nothing arrives through them.
     ("CursorGrabMode", Plumbing),
     ("CursorIcon", Plumbing),

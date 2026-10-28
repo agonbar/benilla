@@ -28,9 +28,11 @@ pub struct Session {
 
 impl Session {
     /// One frame: the call to make, if any. `deflected` is whether the stick is out of its dead
-    /// zone, `dt` the frame's seconds.
-    pub fn step(&mut self, deflected: bool, dt: f32) -> Option<Call> {
-        if deflected {
+    /// zone, `covered` whether the loading cover is up, `dt` the frame's seconds. Under the cover
+    /// the stick counts as at rest: a mouse cannot open a look there, so the stick does not either,
+    /// and a session already open closes.
+    pub fn step(&mut self, deflected: bool, covered: bool, dt: f32) -> Option<Call> {
+        if deflected && !covered {
             self.rested = 0.0;
             return (!self.open).then_some(Call::Start);
         }
@@ -63,24 +65,34 @@ mod tests {
     #[test]
     fn the_session_opens_once_and_closes_after_the_stick_rests() {
         let mut s = Session::default();
-        assert_eq!(s.step(true, 0.016), Some(Call::Start));
+        assert_eq!(s.step(true, false, 0.016), Some(Call::Start));
         s.open = true;
-        assert_eq!(s.step(true, 0.016), None, "already open");
-        assert_eq!(s.step(false, 0.2), None);
+        assert_eq!(s.step(true, false, 0.016), None, "already open");
+        assert_eq!(s.step(false, false, 0.2), None);
         assert_eq!(
-            s.step(true, 0.016),
+            s.step(true, false, 0.016),
             None,
             "a brush of the zone restarts the rest"
         );
-        assert_eq!(s.step(false, 0.3), None);
-        assert_eq!(s.step(false, 0.2), Some(Call::Stop));
+        assert_eq!(s.step(false, false, 0.3), None);
+        assert_eq!(s.step(false, false, 0.2), Some(Call::Stop));
+    }
+
+    #[test]
+    fn the_cover_blocks_a_start_and_lets_an_open_session_close() {
+        let mut s = Session::default();
+        assert_eq!(s.step(true, true, 0.016), None, "no start under the cover");
+        assert_eq!(s.step(true, false, 0.016), Some(Call::Start));
+        s.open = true;
+        assert_eq!(s.step(true, true, 0.3), None);
+        assert_eq!(s.step(true, true, 0.2), Some(Call::Stop));
     }
 
     #[test]
     fn a_closed_session_stays_quiet() {
         let mut s = Session::default();
         for _ in 0..100 {
-            assert_eq!(s.step(false, 0.1), None);
+            assert_eq!(s.step(false, false, 0.1), None);
         }
     }
 

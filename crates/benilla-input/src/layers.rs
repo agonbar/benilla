@@ -178,4 +178,27 @@ mod tests {
         let both = m(&["PADLSHOULDER", "PAD1"]);
         assert!(both.shift && both.alt);
     }
+
+    /// Every command the defaults bind is one the stock `Bindings.xml` declares; a misspelled one
+    /// would bind to nothing and say so nowhere.
+    #[test]
+    fn every_default_command_is_declared_by_the_stock_bindings_file() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = benilla_formats::Chain::open(&data).expect("the install's archives open");
+        let bytes = chain
+            .read(r"Interface\FrameXML\Bindings.xml")
+            .expect("the chain has Bindings.xml");
+        let declared: HashSet<String> =
+            benilla_ui::bindings_xml::parse(&benilla_ui::source::decode(&bytes))
+                .expect("parses")
+                .into_iter()
+                .map(|b| b.name)
+                .collect();
+        let unknown: Vec<_> = default_bindings()
+            .into_iter()
+            .map(|(_, command)| command)
+            .filter(|c| !declared.contains(c))
+            .collect();
+        assert!(unknown.is_empty(), "undeclared commands: {unknown:?}");
+    }
 }

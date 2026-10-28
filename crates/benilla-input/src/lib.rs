@@ -26,7 +26,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 
-use benilla_app::{AppExit, BindingKeyInput, BuildId};
+use benilla_app::{AppExit, BindingKeyInput, BuildId, CoverUp};
 use benilla_ui::script::UiScript;
 
 pub use config::{Device, PadConfig, Source};
@@ -174,12 +174,14 @@ fn drive_look(
     cfg: Res<PadConfig>,
     trace: Res<Trace>,
     time: Res<Time<Real>>,
+    cover: CoverUp,
     mut session: Local<look::Session>,
     mut script: Option<NonSendMut<UiScript>>,
     mut motion: MessageWriter<MouseMotion>,
 ) {
     let dt = time.delta_secs();
-    if let Some(call) = session.step(state.right != Vec2::ZERO, dt) {
+    let covered = cover.get();
+    if let Some(call) = session.step(state.right != Vec2::ZERO, covered, dt) {
         if let Some(s) = script.as_mut() {
             let (chunk, open) = match call {
                 look::Call::Start => ("MouselookStart()", true),
@@ -196,7 +198,7 @@ fn drive_look(
             }
         }
     }
-    if session.open {
+    if session.open && !covered {
         let delta = look::motion(state.right, &cfg, dt);
         if delta != Vec2::ZERO {
             motion.write(MouseMotion { delta });

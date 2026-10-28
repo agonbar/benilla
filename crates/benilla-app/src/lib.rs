@@ -199,7 +199,7 @@ pub use benilla_world::worldview::run as run_worldview;
 pub use bevy::app::AppExit;
 // A crate on top of benilla reads objects and interacts through these, with no protocol dependency.
 pub use benilla_protocol::{messages::ObjectType, ObjectFields};
-pub use bindings::{register_default_bindings, register_key_tokens, BindingKeyInput};
+pub use bindings::{register_default_bindings, register_key_tokens, BindingKeyInput, CoverUp};
 pub use camera_shake::NoCameraShake;
 pub use net::Objects;
 pub use target::Interact;
