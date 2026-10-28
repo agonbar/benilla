@@ -550,10 +550,17 @@ fn show_os_cursor(rt: &mut Runtime, opts: &mut CursorOptions) {
     }
 }
 
+/// Whether the pad holds a mouselook session: in gameplay mode with a pad to play it. With no pad
+/// connected the mouse owns the camera and the cursor.
+fn wants_look(world: bool, mode: Mode, connected: bool) -> bool {
+    world && connected && mode == Mode::Gameplay
+}
+
 /// The right stick as a held mouselook session ([`look`]), open for all of gameplay mode.
 fn drive_look(
     state: Res<PadState>,
     cfg: Res<PadConfig>,
+    device: Res<PadDevice>,
     trace: Res<Trace>,
     time: Res<Time<Real>>,
     cover: CoverUp,
@@ -565,7 +572,7 @@ fn drive_look(
 ) {
     let dt = time.delta_secs();
     let covered = cover.get();
-    let want = rt.world && rt.machine.mode() == Mode::Gameplay;
+    let want = wants_look(rt.world, rt.machine.mode(), device.connected());
     if let Some(call) = session.step(want, covered, mouse.pressed(MouseButton::Right)) {
         if let Some(s) = script.as_mut() {
             let (chunk, open) = match call {
@@ -692,6 +699,35 @@ mod tests {
         m.iter_current_update_messages()
             .map(|b| (b.button, b.state))
             .collect()
+    }
+
+    #[test]
+    fn no_pad_means_no_look_session_and_a_disconnect_closes_it() {
+        let mut session = look::Session::default();
+        let mut frame = |connected: bool| {
+            let want = wants_look(true, Mode::Gameplay, connected);
+            let call = session.step(want, false, false);
+            match call {
+                Some(look::Call::Start) => session.open = true,
+                Some(look::Call::Stop) => session.open = false,
+                None => {}
+            }
+            call
+        };
+        assert_eq!(frame(false), None, "no pad, no session");
+        assert_eq!(frame(false), None);
+        assert_eq!(frame(true), Some(look::Call::Start));
+        assert_eq!(frame(true), None);
+        assert_eq!(frame(false), Some(look::Call::Stop), "the pad went away");
+        assert_eq!(frame(false), None);
+        assert!(
+            !wants_look(false, Mode::Gameplay, true),
+            "no world, no look"
+        );
+        assert!(
+            !wants_look(true, Mode::Cursor, true),
+            "cursor mode, no look"
+        );
     }
 
     /// One scenario, in order: the pad globals the seam holds are shared, so it is one test.

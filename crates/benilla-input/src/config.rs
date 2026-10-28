@@ -13,8 +13,8 @@
 //! emulate_ctrl = "PADRTRIGGER"
 //! emulate_alt = "both"       # "both": shift and ctrl held together press as ALT- alone
 //! presentation = "auto"      # "kbm" or "controller" pins what the bars show; auto follows input
-//! cursor_stick = "right"     # the stick that moves the cursor in cursor mode; "left" lets the
-//!                            # left stick move it too, and then no stick leaves cursor mode
+//! cursor_stick = "right"     # the stick that moves the cursor in cursor mode; "left" makes the
+//!                            # left stick the only cursor stick, and then no stick leaves cursor mode
 //! cursor_speed = 1100.0      # cursor pixels per second at full deflection
 //! ui_scale = "off"           # "deck" sets the UI scale for a 1280x800 screen, or a number
 //! ```
