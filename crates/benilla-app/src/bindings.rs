@@ -28,7 +28,7 @@ use bevy::input::mouse::MouseScrollUnit;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
-use benilla_ui::script::keybind::KeybindRequest;
+use benilla_ui::script::keybind::{KeyBinding, KeybindRequest};
 use benilla_ui::script::{KeyUp, KeyWalk, UiScript};
 
 use crate::client_state::InWorldGated;
@@ -39,9 +39,46 @@ mod layout;
 mod script_input;
 mod store;
 
+#[cfg(test)]
+mod ext_tests;
+
+pub use chord::register_key_tokens;
 use chord::{BindKey, Chord};
 pub(crate) use layout::LayoutNames;
 pub(crate) use script_input::Input;
+
+/// A press or release of an input a crate on top named ([`register_key_tokens`]), with the
+/// modifiers it holds. It walks the UI frames as a key does and then runs the chord's command; the
+/// modifiers travel with it, so no key state leaks to other readers.
+#[derive(Message, Clone, Debug, PartialEq, Eq)]
+pub struct BindingKeyInput {
+    pub token: &'static str,
+    pub pressed: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+    pub shift: bool,
+}
+
+/// Default bindings a crate on top adds to the player's `DefaultBindings.wtf`, so the stored sets
+/// are diffs against them and never carry them.
+static EXT_DEFAULTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Add default `(key, command)` bindings; call before the bindings seed.
+pub fn register_default_bindings(pairs: &[(&str, &str)]) {
+    let mut list = EXT_DEFAULTS.lock().unwrap_or_else(|e| e.into_inner());
+    list.extend(pairs.iter().map(|(k, c)| (k.to_string(), c.to_string())));
+}
+
+/// The player's defaults and the ones a crate on top registered.
+fn with_ext_defaults(mut defaults: Vec<KeyBinding>) -> Vec<KeyBinding> {
+    defaults.extend(
+        EXT_DEFAULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
+    );
+    defaults
+}
 
 /// The chord-to-command map, rebuilt whenever the engine table's generation moves. Probe it
 /// through [`BindingDispatch::resolve`]: the lookup is two probes.
@@ -142,6 +179,7 @@ enum Held {
     Key(KeyCode),
     Mouse(MouseButton),
     Wheel,
+    Ext(&'static str),
 }
 
 impl BindingsState {
@@ -199,6 +237,7 @@ impl Plugin for BindingsPlugin {
             .init_resource::<BindingDispatch>()
             .init_resource::<BindingsState>()
             .init_resource::<BindingFiles>()
+            .add_message::<BindingKeyInput>()
             .add_systems(
                 Update,
                 (
@@ -227,8 +266,7 @@ impl Plugin for BindingsPlugin {
 /// read first because the stored sets are diffs against them ([`store`]'s deviation), and nothing
 /// reads set 0 before `LoadBindings(0)`.
 pub(crate) fn seed_bindings_for_vm(world: &mut World, script: &mut UiScript) {
-    let defaults = crate::ui_script::default_bindings();
-    script.set_default_bindings(defaults);
+    script.set_default_bindings(with_ext_defaults(crate::ui_script::default_bindings()));
     let defaults = script.default_bindings();
     let account = crate::local_state::bindings_account_path();
     let overrides = read_diff(&account).unwrap_or_default();
@@ -438,6 +476,7 @@ fn latch_and_dispatch(
     mut state: ResMut<BindingsState>,
     mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
     mut focus_lost: MessageReader<bevy::input::keyboard::KeyboardFocusLost>,
+    mut ext_input: MessageReader<BindingKeyInput>,
     cover: Option<Res<crate::loading_screen::LoadingScreen>>,
 ) {
     state.just.clear();
@@ -582,6 +621,38 @@ fn latch_and_dispatch(
         }
     }
 
+    // ── Extension inputs ── walk the UI frames as a key does, then run the chord's command; a
+    // focused box or a frame that took the press ends it there.
+    for ev in ext_input.read() {
+        let held = Held::Ext(ev.token);
+        if !ev.pressed {
+            release(&mut state, &mut script, held);
+            if let Some(s) = script.as_mut() {
+                s.key_up(ev.token);
+            }
+            continue;
+        }
+        let walk = script.as_mut().map(|s| s.key_down(ev.token));
+        if walk.is_some_and(|w| w != KeyWalk::Declined)
+            || typing
+            || state.latched.iter().any(|(k, _)| *k == held)
+        {
+            continue;
+        }
+        let chord = Chord {
+            alt: ev.alt,
+            ctrl: ev.ctrl,
+            shift: ev.shift,
+            key: BindKey::Ext(ev.token),
+        };
+        if let Some(command) = dispatch.resolve(chord, false) {
+            if let Some(s) = script.as_mut() {
+                s.note_world_key(ev.token);
+            }
+            press(&mut state, &mut script, command, held);
+        }
+    }
+
     // ── Mouse buttons ── presses only with the cursor over the world (a frame owns its clicks),
     // releases always.
     for b in [
@@ -662,6 +733,8 @@ fn physically_down(
         Held::Mouse(b) => buttons.pressed(b),
         // A notch is a press and a release in one frame; it is never "held".
         Held::Wheel => false,
+        // The sender releases it; no button plane to read.
+        Held::Ext(_) => true,
     }
 }
 

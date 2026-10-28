@@ -20,11 +20,14 @@ bevy_dynamic_linking = ["benilla-app/bevy_dynamic_linking"]
 # Experimental: the UI scripts on benilla's own 1.12 interpreter.
 benilla-vm = ["benilla-app/benilla-vm"]
 # Stereo VR through OpenXR: `main` starts `benilla_vr::run`.
-vr = ["dep:benilla-vr"]
+vr = ["dep:benilla-vr", "pad"]
+# Gamepad input (a Steam Deck's pad): `main` starts `benilla_input::run`.
+pad = ["dep:benilla-input"]
 
 [dependencies]
 # `default-features = false`, or `--no-default-features` here still builds benilla-app with `dev`.
 benilla-app = { path = "../benilla-app", default-features = false }
+benilla-input = { path = "../benilla-input", default-features = false, optional = true }
 benilla-vr = { path = "../benilla-vr", default-features = false, optional = true }
 
 [build-dependencies]

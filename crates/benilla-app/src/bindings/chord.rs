@@ -38,6 +38,29 @@ pub(crate) enum BindKey {
     Mouse(MouseButton),
     WheelUp,
     WheelDown,
+    /// An input a crate on top of benilla names ([`register_key_tokens`]), such as a gamepad
+    /// button; 1.12.1 has none.
+    Ext(&'static str),
+}
+
+/// The extra key tokens a crate on top registered; the tokens [`token_key`] knows beyond 1.12's.
+static EXT_TOKENS: std::sync::RwLock<Vec<&'static str>> = std::sync::RwLock::new(Vec::new());
+
+/// Name more inputs to the binding store: each token parses as a chord's base input and binds like
+/// a key. Tokens are upper case and contain no `-` or space. Register before the first bindings
+/// load, or a stored binding of the token is dropped as unpressable.
+pub fn register_key_tokens(tokens: &[&'static str]) {
+    let mut list = EXT_TOKENS.write().unwrap_or_else(|e| e.into_inner());
+    for t in tokens {
+        if !list.contains(t) {
+            list.push(t);
+        }
+    }
+}
+
+fn ext_token(t: &str) -> Option<&'static str> {
+    let list = EXT_TOKENS.read().unwrap_or_else(|e| e.into_inner());
+    list.iter().copied().find(|n| *n == t)
 }
 
 /// One parsed binding chord: the modifier set and the base input, matched by equality.
@@ -262,6 +285,9 @@ fn token_key(t: &str) -> Option<BindKey> {
         "MOUSEWHEELUP" => return Some(BindKey::WheelUp),
         "MOUSEWHEELDOWN" => return Some(BindKey::WheelDown),
         _ => {}
+    }
+    if let Some(token) = ext_token(t) {
+        return Some(BindKey::Ext(token));
     }
     // One character: what a layout names some key, which the namer writes as UTF-8 (`0x4b66b0`'s
     // `[0x21, 0xff]` arm through `0x41abb0`). [`key_token`] folds `a`-`z` up as the lookup does,
