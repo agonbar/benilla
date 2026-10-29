@@ -318,6 +318,12 @@ impl SoftScan<'_, '_> {
                 let factions = self.factions.as_deref();
                 if can_attack(Some(store), factions, &self.reputations, me) {
                     Some(Kind::Enemy)
+                } else if store.0.unit_npc_flags() != 0
+                    && can_interact(Some(store), factions, &self.reputations, me)
+                {
+                    // Ahead of `CanAssist`: a faction town's service NPC carries `UNIT_FLAG_PVP`,
+                    // which `CanAssist` accepts, and it must stay an NPC for the interact button.
+                    Some(Kind::Npc)
                 } else if can_assist(
                     Some(store),
                     factions,
@@ -327,10 +333,6 @@ impl SoftScan<'_, '_> {
                     Assist::PlayerToUnit,
                 ) {
                     Some(Kind::Friend)
-                } else if store.0.unit_npc_flags() != 0
-                    && can_interact(Some(store), factions, &self.reputations, me)
-                {
-                    Some(Kind::Npc)
                 } else {
                     None
                 }

@@ -358,6 +358,53 @@ fn the_scan_finds_what_is_in_front_and_in_range() {
     assert_eq!(f.app.world().resource::<SoftState>().guid(), None);
 }
 
+/// A faction town's quest giver or vendor carries `UNIT_FLAG_PVP`, which makes `CanAssist` accept
+/// it. It is still an NPC with a service, so the contextual button interacts with it.
+#[test]
+fn a_friendly_npc_with_the_pvp_flag_is_an_npc_and_makes_the_button_interact() {
+    use benilla_formats::{FactionCatalog, FactionTemplate};
+    use benilla_protocol::field::{
+        FIELD_UNIT_FACTIONTEMPLATE, FIELD_UNIT_FLAGS, FIELD_UNIT_NPC_FLAGS,
+    };
+    const FACTION: u32 = 7;
+    let mut f = fix();
+    let world = f.app.world_mut();
+    // Template 1 is faction 7, and the server forces that faction friendly (4) toward us.
+    world.insert_resource(crate::target::ring::Factions::from_catalog(
+        FactionCatalog::from_rows(
+            std::collections::HashMap::from([(
+                1,
+                FactionTemplate {
+                    faction: FACTION,
+                    group_mask: 0,
+                    friend_group_mask: 0,
+                    enemy_group_mask: 0,
+                    enemies: [0; 4],
+                    friends: [0; 4],
+                },
+            )]),
+            std::collections::HashMap::new(),
+        ),
+    ));
+    world
+        .resource_mut::<crate::net::Reputations>()
+        .set_forced(vec![(FACTION, 4)]);
+    // `UNIT_FLAG_PVP` and `UNIT_NPC_FLAG_GOSSIP`.
+    let npc = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+        (22, 100),
+        (28, 100),
+        (FIELD_UNIT_FACTIONTEMPLATE, 1),
+        (FIELD_UNIT_FLAGS, 0x1000),
+        (FIELD_UNIT_NPC_FLAGS, 1),
+    ]));
+    world.entity_mut(f.mob).insert(npc);
+    f.send(SoftTargetInput::Active(true));
+    f.app.world_mut().run_system_once(update_soft).unwrap();
+    let state = f.app.world().resource::<SoftState>();
+    assert_eq!(state.ranked.first().map(|c| c.kind), Some(Kind::Npc));
+    assert!(f.app.world().resource::<SoftTargetReady>().0);
+}
+
 /// The soft target is published as the mouseover, and nothing is sent.
 #[test]
 fn the_soft_target_is_the_mouseover_and_only_in_mouselook() {
