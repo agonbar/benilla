@@ -65,7 +65,14 @@ pub fn default_bindings() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (layer, prefix) in LAYER_PREFIX.iter().enumerate() {
         for (i, slot) in SLOTS.iter().enumerate() {
-            out.push((format!("{prefix}{slot}"), layer_command(layer, i)));
+            // `PAD1`, the A button, is the contextual interact or jump, so bar slot 1 of the plain
+            // layer moves to the left stick's click.
+            let key = if (layer, i) == (0, 0) {
+                "PADLSTICK".to_owned()
+            } else {
+                format!("{prefix}{slot}")
+            };
+            out.push((key, layer_command(layer, i)));
         }
     }
     // Movement from the left stick's four directions; two together are a diagonal.
@@ -74,11 +81,14 @@ pub fn default_bindings() -> Vec<(String, String)> {
         ("PADLSTICKDOWN", "MOVEBACKWARD"),
         ("PADLSTICKLEFT", "STRAFELEFT"),
         ("PADLSTICKRIGHT", "STRAFERIGHT"),
-        // The stick clicks, `PADLSTICK` and `PADRSTICK` in retail's names.
-        ("PADLSTICK", "JUMP"),
+        // A interacts with the NPC, corpse or object in front and jumps when there is none. `JUMP`
+        // and `INTERACTTARGET` stay separate commands for a player who wants two buttons.
+        ("PAD1", "INTERACTORJUMP"),
+        // The right stick's click, `PADRSTICK` in retail's names.
         ("PADRSTICK", "TOGGLEAUTORUN"),
-        ("PADLSHOULDER", "TARGETNEARESTFRIEND"),
-        ("PADRSHOULDER", "TARGETNEARESTENEMY"),
+        // The bumpers lock the soft target's friend and enemy: `crate::soft`, not a binding. The
+        // left trigger and the right bumper interact.
+        ("SHIFT-PADRSHOULDER", "INTERACTTARGET"),
         ("PADFORWARD", "TOGGLEGAMEMENU"),
     ] {
         out.push((key.to_owned(), command.to_owned()));
@@ -113,7 +123,9 @@ mod tests {
     #[test]
     fn layers_hold_the_planned_commands() {
         let table: std::collections::HashMap<_, _> = default_bindings().into_iter().collect();
-        assert_eq!(table["PAD1"], "ACTIONBUTTON1");
+        assert_eq!(table["PAD1"], "INTERACTORJUMP");
+        assert_eq!(table["PADLSTICK"], "ACTIONBUTTON1");
+        assert_eq!(table["PAD2"], "ACTIONBUTTON2");
         assert_eq!(table["PADDUP"], "ACTIONBUTTON8");
         assert_eq!(table["SHIFT-PAD1"], "ACTIONBUTTON9");
         assert_eq!(table["SHIFT-PAD4"], "ACTIONBUTTON12");
@@ -123,10 +135,20 @@ mod tests {
         assert_eq!(table["CTRL-PADDUP"], "MULTIACTIONBAR1BUTTON12");
         assert_eq!(table["ALT-PAD1"], "MULTIACTIONBAR2BUTTON1");
         assert_eq!(table["ALT-PADDUP"], "MULTIACTIONBAR2BUTTON8");
-        assert_eq!(table["PADLSTICK"], "JUMP");
+        assert!(
+            !table.values().any(|c| c == "JUMP"),
+            "JUMP is a command to bind, not a default"
+        );
+        assert_eq!(table["SHIFT-PADRSHOULDER"], "INTERACTTARGET");
         assert_eq!(table["PADRSTICK"], "TOGGLEAUTORUN");
         assert_eq!(table["PADFORWARD"], "TOGGLEGAMEMENU");
-        assert!(!table.contains_key("PADBACK"), "PADBACK waits for phase 2");
+        assert!(
+            !table.contains_key("PADBACK"),
+            "PADBACK is the mode switch, not a binding"
+        );
+        for key in ["PADLSHOULDER", "PADRSHOULDER"] {
+            assert!(!table.contains_key(key), "{key} is the soft target's");
+        }
     }
 
     #[test]
@@ -188,10 +210,12 @@ mod tests {
         let bytes = chain
             .read(r"Interface\FrameXML\Bindings.xml")
             .expect("the chain has Bindings.xml");
+        // The stock file's commands, and the two the shipped addon declares.
         let declared: HashSet<String> =
             benilla_ui::bindings_xml::parse(&benilla_ui::source::decode(&bytes))
                 .expect("parses")
                 .into_iter()
+                .chain(benilla_ui::bindings_xml::parse(crate::addon::BINDINGS).expect("parses"))
                 .map(|b| b.name)
                 .collect();
         let unknown: Vec<_> = default_bindings()

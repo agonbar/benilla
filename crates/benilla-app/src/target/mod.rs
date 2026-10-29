@@ -44,6 +44,7 @@ mod reticle;
 pub(crate) mod ring;
 mod scan;
 mod script;
+mod soft;
 pub(crate) use script::ScriptSelect;
 
 /// `Faction.dbc` and our reputation table as one [`SystemParam`], since every reaction function
@@ -90,6 +91,7 @@ pub(crate) use ring::{ring_variant, PlayerPath, SelectorInput};
 
 pub use click::Interact;
 pub(crate) use click::{clear_selection_on_world_teardown, deselect_on_ui_shutdown, DeselectGuid};
+pub use soft::{SoftSide, SoftTargetConfig, SoftTargetInput, SoftTargetReady};
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server,
 /// and cleared on deselect or when it streams out. `CMSG_SET_SELECTION` carries the guid, which the
@@ -291,6 +293,7 @@ pub(crate) struct TargetPlugin;
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
+        app.add_plugins(soft::SoftTargetPlugin);
         app.init_resource::<Selection>()
             .init_resource::<ClickConfig>()
             .init_resource::<AssistAttack>()

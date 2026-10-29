@@ -1,4 +1,5 @@
-//! The addon benilla-input ships: pad glyphs on the bars, and the pad's cursor. It is written into
+//! The addon benilla-input ships: pad glyphs on the bars, the pad's cursor, and the two interact
+//! commands of the Key Bindings window. It is written into
 //! the `AddOns/` folder of [`benilla_app::config_dir`], where benilla loads addons from, and
 //! loads as any addon does. Written against the 1.12 API only.
 
@@ -7,12 +8,17 @@ use std::path::Path;
 pub const NAME: &str = "BenillaPad";
 const TOC: &str = include_str!("../addon/BenillaPad.toc");
 const LUA: &str = include_str!("../addon/BenillaPad.lua");
+pub(crate) const BINDINGS: &str = include_str!("../addon/Bindings.xml");
 
 /// Write the addon under `config`, leaving a file alone when it already reads the same.
 pub fn install(config: &Path) -> std::io::Result<()> {
     let dir = config.join("AddOns").join(NAME);
     std::fs::create_dir_all(&dir)?;
-    for (file, text) in [("BenillaPad.toc", TOC), ("BenillaPad.lua", LUA)] {
+    for (file, text) in [
+        ("BenillaPad.toc", TOC),
+        ("BenillaPad.lua", LUA),
+        ("Bindings.xml", BINDINGS),
+    ] {
         let path = dir.join(file);
         if std::fs::read_to_string(&path).is_ok_and(|t| t == text) {
             continue;
@@ -130,6 +136,39 @@ mod tests {
             .unwrap();
         tick();
         assert!(!shown());
+    }
+
+    /// Both commands show in Key Bindings (a declared name and a label), and a body queues the ask
+    /// `soft::asks` reads.
+    #[test]
+    fn the_two_interact_commands_are_declared_and_their_bodies_queue_an_ask() {
+        use crate::soft::{asks, Ask, TAKE_ASKS};
+        let s = loaded();
+        let bindings = benilla_ui::bindings_xml::parse(BINDINGS).expect("well-formed");
+        let names: Vec<_> = bindings.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["INTERACTTARGET", "INTERACTORJUMP"]);
+        assert_eq!(bindings[0].header.as_deref(), Some("BENILLAPAD"));
+        for name in names {
+            let label: Option<String> = s.eval(&format!("return BINDING_NAME_{name}")).unwrap();
+            assert!(label.is_some_and(|l| !l.is_empty()), "{name} has no label");
+        }
+        assert_eq!(
+            s.eval::<Option<String>>("return BINDING_HEADER_BENILLAPAD")
+                .unwrap()
+                .as_deref(),
+            Some("Benilla Pad")
+        );
+        for b in &bindings {
+            s.run(&b.body).unwrap();
+        }
+        let text: Option<String> = s.eval(TAKE_ASKS).unwrap();
+        assert_eq!(
+            asks(&text.unwrap()),
+            [Ask::Interact, Ask::InteractOrJump],
+            "the asks come out in press order"
+        );
+        let again: Option<String> = s.eval(TAKE_ASKS).unwrap();
+        assert_eq!(again, None, "taking clears them");
     }
 
     #[test]
