@@ -46,6 +46,8 @@ use bevy::ui::IsDefaultUiCamera;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
 use benilla_world::ffx_glow::FfxBackdrop;
+
+use crate::laser::Aimed;
 use benilla_world::view::NEARCLIP_DEFAULT;
 use bevy_mod_openxr::render::{update_views, XR_TEXTURE_INDEX};
 use bevy_mod_openxr::resources::OxrFrameState;
@@ -87,7 +89,7 @@ pub(crate) struct PanelCamera;
 
 /// The quad that carries the UI image.
 #[derive(Component)]
-struct PanelScreen;
+pub(crate) struct PanelScreen;
 
 /// The cursor marker.
 #[derive(Component)]
@@ -142,6 +144,13 @@ pub fn marker_position(
     Some(Vec2::new((uv.x - 0.5) * panel.x, (0.5 - uv.y) * panel.y))
 }
 
+/// The panel quad in the tracking root's space for a panel of `size`: the panel's place under the
+/// root and the quad's scale, which `spawn_panel` and `shape_panel` give its two entities. The quad
+/// faces +Z and is a unit square before the scale.
+pub fn quad_in_root(size: Vec2) -> Transform {
+    Transform::from_xyz(0.0, -PANEL_DROP, -PANEL_DISTANCE).with_scale(size.extend(1.0))
+}
+
 /// A fresh UI image at `size` physical pixels: a render target the camera clears each frame and
 /// both readers sample, never read back by the CPU.
 fn new_ui_image(size: UVec2) -> Image {
@@ -169,21 +178,23 @@ pub struct PanelPlugin;
 
 impl Plugin for PanelPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UiPanel>().add_systems(
-            PostUpdate,
-            (
-                sync_session,
+        app.init_resource::<UiPanel>()
+            .init_resource::<Aimed>()
+            .add_systems(
+                PostUpdate,
                 (
-                    track_window,
-                    unclaim_world,
-                    shape_panel,
-                    place_marker,
-                    activate_overlays,
-                ),
-            )
-                .chain()
-                .before(update_views),
-        );
+                    sync_session,
+                    (
+                        track_window,
+                        unclaim_world,
+                        shape_panel,
+                        place_marker,
+                        activate_overlays,
+                    ),
+                )
+                    .chain()
+                    .before(update_views),
+            );
     }
 }
 
@@ -501,18 +512,21 @@ fn shape_panel(
     }
 }
 
-/// The cursor marker follows `Window::cursor_position` and hides with the OS cursor.
+/// The cursor marker follows the laser where it hits the panel, else `Window::cursor_position`,
+/// and hides with the OS cursor.
 fn place_marker(
     windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     screen: Query<&Transform, (With<PanelScreen>, Without<CursorMarker>)>,
+    aimed: Res<Aimed>,
     mut marker: Query<(&mut Transform, &mut Visibility), With<CursorMarker>>,
 ) {
     let (Ok((window, cursor)), Ok(screen)) = (windows.single(), screen.single()) else {
         return;
     };
+    let laser = aimed.hit.map(|h| h.cursor);
     let at = marker_position(
-        window.cursor_position(),
-        cursor.visible,
+        laser.or(window.cursor_position()),
+        laser.is_some() || cursor.visible,
         Vec2::new(window.width(), window.height()),
         screen.scale.truncate(),
     );
@@ -548,6 +562,8 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use bevy::window::WindowResolution;
 
+    use crate::laser::PanelHit;
+
     const START_ORDER: isize = 1;
 
     fn app(state: XrState) -> (App, Entity, Entity) {
@@ -558,6 +574,7 @@ mod tests {
             .init_asset::<StandardMaterial>()
             .init_asset::<ColorMaterial>()
             .init_resource::<UiPanel>()
+            .init_resource::<Aimed>()
             .insert_resource(state);
         app.world_mut().spawn((
             Window {
@@ -748,6 +765,53 @@ mod tests {
     }
 
     #[test]
+    fn the_marker_follows_the_laser_even_with_the_os_cursor_hidden() {
+        let (mut app, _, window) = app(XrState::Running);
+        step(&mut app);
+        app.world_mut()
+            .get_mut::<CursorOptions>(window)
+            .unwrap()
+            .visible = false;
+        app.world_mut().run_system_once(shape_panel).unwrap();
+        // Three quarters across and a quarter down the window, whatever its scale factor makes it.
+        let logical = {
+            let w = app.world().get::<Window>(window).unwrap();
+            Vec2::new(w.width(), w.height())
+        };
+        *app.world_mut().resource_mut::<Aimed>() = Aimed {
+            tracked: true,
+            hit: Some(PanelHit {
+                cursor: logical * Vec2::new(0.75, 0.25),
+                local: Vec2::ZERO,
+                distance: 1.5,
+            }),
+        };
+        app.world_mut().run_system_once(place_marker).unwrap();
+
+        let (transform, visibility) = app
+            .world_mut()
+            .query_filtered::<(&Transform, &Visibility), With<CursorMarker>>()
+            .single(app.world())
+            .unwrap();
+        let panel = panel_size(1280.0 / 720.0);
+        assert_eq!(
+            transform.translation.truncate(),
+            Vec2::new(0.25 * panel.x, 0.25 * panel.y)
+        );
+        assert_eq!(*visibility, Visibility::Inherited);
+
+        // The laser lets go and the OS cursor is still hidden: so is the marker.
+        *app.world_mut().resource_mut::<Aimed>() = Aimed::default();
+        app.world_mut().run_system_once(place_marker).unwrap();
+        let visibility = app
+            .world_mut()
+            .query_filtered::<&Visibility, With<CursorMarker>>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(*visibility, Visibility::Hidden);
+    }
+
+    #[test]
     fn a_session_that_does_not_run_changes_nothing() {
         for state in [XrState::Unavailable, XrState::Idle] {
             let (mut app, ui, _) = app(state);
@@ -785,6 +849,15 @@ mod tests {
         assert!(app.world().entity(root).contains::<XrTrackingRoot>());
         let at = app.world().get::<Transform>(panel).unwrap().translation;
         assert_eq!(at, Vec3::new(0.0, -PANEL_DROP, -PANEL_DISTANCE));
+        // The quad the laser hits is the quad the two entities compose.
+        let (panel_t, screen_t) = (
+            *app.world().get::<Transform>(panel).unwrap(),
+            *app.world().get::<Transform>(screen).unwrap(),
+        );
+        assert_eq!(
+            panel_t.mul_transform(screen_t),
+            quad_in_root(panel_size(1280.0 / 720.0))
+        );
         let layers = app.world().get::<RenderLayers>(screen).unwrap();
         assert_eq!(*layers, RenderLayers::layer(PANEL_RENDER_LAYER));
     }

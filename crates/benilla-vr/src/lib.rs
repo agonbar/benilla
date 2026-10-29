@@ -8,12 +8,18 @@
 //! camera draws nothing; the eyes draw through the same FFX path a camera no UI camera claims takes
 //! (`benilla_world::final_pass`), so no upstream render code changes.
 //!
+//! The Touch controllers are a pad for `benilla-input` (`hands`, `touch`), and the right one is a
+//! laser that points at the UI panel and clicks, drags and scrolls on it (`laser`).
+//!
 //! Without OpenXR (no loader, runtime or headset) [`run`] is the flat client.
 
 mod glare;
+mod hands;
+mod laser;
 mod panel;
 mod rig;
 mod sky_trace;
+mod touch;
 
 use bevy::app::PluginGroupBuilder;
 use bevy::camera::visibility::VisibilitySystems;
@@ -112,7 +118,12 @@ impl Plugin for VrPlugin {
             // The underwater screen warp is off in VR: displacing the whole view is
             // uncomfortable in a headset. The murk fog stays.
             .insert_resource(benilla_world::ffx_glow::NoScreenWarp)
-            .add_plugins((panel::PanelPlugin, CullCameraPlugin))
+            .add_plugins((
+                panel::PanelPlugin,
+                hands::HandsPlugin,
+                laser::LaserPlugin,
+                CullCameraPlugin,
+            ))
             .add_systems(XrSessionCreated, spawn_eyes)
             .add_systems(Update, pace_window)
             .add_systems(

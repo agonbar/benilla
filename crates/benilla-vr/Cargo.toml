@@ -11,11 +11,12 @@ workspace = true
 [features]
 # The instruments; the player build is `--no-default-features`.
 default = ["dev"]
-dev = ["benilla-app/dev"]
+dev = ["benilla-app/dev", "benilla-input/dev"]
 
 [dependencies]
 # `default-features = false`, or a player build still gets benilla-app with `dev`.
 benilla-app = { path = "../benilla-app", default-features = false }
+benilla-input = { path = "../benilla-input", default-features = false }
 benilla-world = { path = "../benilla-world", default-features = false }
 bevy.workspace = true
 # Vulkan only (the default feature). No `window_support`: it replaces benilla's `WindowPlugin`. The

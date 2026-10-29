@@ -53,11 +53,44 @@ use benilla_ui::script::UiScript;
 use actions::Act;
 use config::CursorStick;
 use host::Host;
-use mode::Mode;
 
 pub use config::{Device, PadConfig, Presentation, Source};
 pub use device::{PadDevice, PadInfo, PadState};
 pub use layers::Modifiers;
+pub use mode::Mode;
+
+/// The pad's input systems, for a crate that is another source of pad input to order against.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PadSystems {
+    /// Reads the raw pad events into [`PadState`]. A source writes its `RawGamepadEvent`s, and
+    /// sets [`Laser`], before it.
+    Read,
+}
+
+/// The mode the pad plays in, kept current for a source that reports it (VR's trace).
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PadMode(pub Mode);
+
+/// Set to have [`PadPlugin`] write a [`PadRouted`] for every token it routes.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct RoutedTrace(pub bool);
+
+/// Where a pad token went: `what` is the command a binding resolved to, or the cursor act or
+/// soft-target press that took it instead. Written only while [`RoutedTrace`] is on.
+#[derive(Message, Clone, Debug)]
+pub struct PadRouted {
+    pub token: &'static str,
+    pub pressed: bool,
+    pub what: String,
+}
+
+/// A laser pointer on the UI panel, set by a crate that has one (VR). While `on_panel`, the
+/// pad is in cursor mode, the right trigger clicks, and the right stick scrolls instead of moving
+/// the pad's cursor ([`actions::scroll`]).
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Laser {
+    pub on_panel: bool,
+}
 
 /// The client with a gamepad: [`benilla_app::run_with_group`] with gilrs on and [`PadPlugin`] added.
 pub fn run(build: BuildId) -> AppExit {
@@ -96,6 +129,9 @@ impl Plugin for PadPlugin {
             .insert_resource(cfg.soft)
             .insert_resource(cfg)
             .init_resource::<PadState>()
+            .init_resource::<Laser>()
+            .init_resource::<PadMode>()
+            .init_resource::<RoutedTrace>()
             .init_resource::<Runtime>()
             .init_resource::<Host>()
             .insert_resource(Trace(
@@ -103,12 +139,13 @@ impl Plugin for PadPlugin {
             ))
             .add_message::<BindingKeyInput>()
             .add_message::<SoftTargetInput>()
+            .add_message::<PadRouted>()
             // Before `InputSystems`: the motion, buttons and keys the pad writes are accumulated
             // there, and the `BindingKeyInput`s are read by the dispatch in `Update`.
             .add_systems(
                 PreUpdate,
                 (
-                    read_pad,
+                    read_pad.in_set(PadSystems::Read),
                     read_world,
                     step_mode,
                     drive_soft,
@@ -152,6 +189,8 @@ struct Runtime {
     /// How each pressed token was routed, for its release.
     routed: HashMap<&'static str, Routed>,
     acts: Vec<Act>,
+    /// Wheel travel the right stick has built up while the laser is on the panel.
+    scroll: f32,
     /// The OS cursor is hidden because the pad's is drawn.
     hid: bool,
     /// The soft target was last told to run.
@@ -269,9 +308,11 @@ fn read_world(
 fn step_mode(
     state: Res<PadState>,
     cfg: Res<PadConfig>,
+    laser: Res<Laser>,
     trace: Res<Trace>,
     time: Res<Time<Real>>,
     mut rt: ResMut<Runtime>,
+    mut current: ResMut<PadMode>,
 ) {
     let back = rt.back.step(state.is_down("PADBACK"), time.delta_secs());
     rt.toggle_keyboard |= back == hold::Back::Long;
@@ -282,10 +323,14 @@ fn step_mode(
         back: back == hold::Back::Tap,
         // Pushing the stick again is a walk; a stick already held when a window opened is not.
         walk: left && !rt.left_was && cfg.cursor_stick == CursorStick::Right,
+        pointing: laser.on_panel,
     };
     let before = rt.machine.mode();
     let after = rt.machine.step(signals);
     rt.left_was = left;
+    if current.0 != after {
+        current.0 = after;
+    }
     if trace.0 && before != after {
         info!(
             "pad: mode {} (windows: {}, targeting: {})",
@@ -374,11 +419,14 @@ fn edges(
 fn route_keys(
     state: Res<PadState>,
     cfg: Res<PadConfig>,
+    laser: Res<Laser>,
     trace: Res<Trace>,
+    routed_on: Res<RoutedTrace>,
     script: Option<NonSend<UiScript>>,
     mut rt: ResMut<Runtime>,
     mut out: MessageWriter<BindingKeyInput>,
     mut soft_out: MessageWriter<SoftTargetInput>,
+    mut routed_out: MessageWriter<PadRouted>,
 ) {
     let rt = &mut *rt;
     if rt.prev_down == *state.down() {
@@ -412,14 +460,28 @@ fn route_keys(
         if trace.0 {
             info!("pad: {token} up -> {command}");
         }
+        if routed_on.0 {
+            routed_out.write(PadRouted {
+                token,
+                pressed: false,
+                what: command.into(),
+            });
+        }
     }
     for token in down {
-        if cursor_mode && actions::consumed(token, left_is_cursor) {
-            let act = actions::press(token);
+        if cursor_mode && actions::consumed(token, left_is_cursor, laser.on_panel) {
+            let act = actions::press(token, laser.on_panel);
             rt.acts.extend(act);
             rt.routed.insert(token, Routed::Cursor(act));
             if trace.0 {
                 info!("pad: {token} down -> cursor:{}", act_name(act));
+            }
+            if routed_on.0 {
+                routed_out.write(PadRouted {
+                    token,
+                    pressed: true,
+                    what: format!("cursor:{}", act_name(act)),
+                });
             }
             continue;
         }
@@ -444,6 +506,13 @@ fn route_keys(
                 if trace.0 {
                     info!("pad: {} down -> {press:?}", trace::chord_text(mods, token));
                 }
+                if routed_on.0 {
+                    routed_out.write(PadRouted {
+                        token,
+                        pressed: true,
+                        what: format!("{press:?}"),
+                    });
+                }
                 continue;
             }
         }
@@ -455,12 +524,21 @@ fn route_keys(
             shift: mods.shift,
         });
         rt.routed.insert(token, Routed::Binding);
-        if trace.0 {
+        if trace.0 || routed_on.0 {
             let command = script
                 .as_ref()
                 .and_then(|s| trace::resolve(&s.binding_keys(), mods, token))
                 .unwrap_or_else(|| "-".into());
-            info!("pad: {} down -> {command}", trace::chord_text(mods, token));
+            if trace.0 {
+                info!("pad: {} down -> {command}", trace::chord_text(mods, token));
+            }
+            if routed_on.0 {
+                routed_out.write(PadRouted {
+                    token,
+                    pressed: true,
+                    what: command,
+                });
+            }
         }
     }
     rt.prev_down = state.down().clone();
@@ -483,6 +561,7 @@ fn act_name(act: Option<Act>) -> String {
 fn drive_cursor(
     state: Res<PadState>,
     cfg: Res<PadConfig>,
+    laser: Res<Laser>,
     trace: Res<Trace>,
     time: Res<Time<Real>>,
     script: Option<NonSend<UiScript>>,
@@ -493,16 +572,28 @@ fn drive_cursor(
     mut keys: MessageWriter<KeyboardInput>,
 ) {
     let rt = &mut *rt;
-    let acts = std::mem::take(&mut rt.acts);
+    let mut acts = std::mem::take(&mut rt.acts);
     let Ok((entity, mut window, mut opts)) = window.single_mut() else {
         return;
     };
+    // The laser has the cursor; the right stick scrolls under it and leaves the pad's cursor alone.
+    let pointing = laser.on_panel && rt.machine.mode() == Mode::Cursor;
+    if pointing {
+        let (notches, held) = actions::scroll(rt.scroll, state.right.y, time.delta_secs());
+        rt.scroll = held;
+        if notches != 0.0 {
+            acts.push(Act::Wheel(notches));
+        }
+    } else {
+        rt.scroll = 0.0;
+    }
     if rt.machine.mode() == Mode::Cursor {
         let size = Vec2::new(window.width(), window.height());
         let mut input = cursor::Input {
             size,
             os: window.cursor_position(),
             stick: match cfg.cursor_stick {
+                _ if pointing => Vec2::ZERO,
                 CursorStick::Right => state.right,
                 CursorStick::Left => state.left,
             },
@@ -531,7 +622,8 @@ fn drive_cursor(
                         info!("pad: snap {dir:?} from {from} -> {to:?}");
                     }
                 }
-                Act::Button { down: true, .. } => input.pad_action = true,
+                // A click at the laser is not the pad taking the cursor.
+                Act::Button { down: true, .. } if !pointing => input.pad_action = true,
                 _ => {}
             }
         }
@@ -815,6 +907,10 @@ mod tests {
             .add_message::<KeyboardInput>()
             .add_message::<SoftTargetInput>()
             .init_resource::<PadState>()
+            .init_resource::<Laser>()
+            .init_resource::<PadMode>()
+            .init_resource::<RoutedTrace>()
+            .add_message::<PadRouted>()
             .init_resource::<Runtime>()
             .init_resource::<ButtonInput<MouseButton>>()
             .insert_resource(PadConfig::default())
@@ -1002,6 +1098,96 @@ mod tests {
         assert_eq!(
             app.world().resource::<Runtime>().machine.mode(),
             Mode::Gameplay
+        );
+
+        // A laser on the panel is cursor mode with nothing open: the right trigger is a left click
+        // held for a drag, not the control layer, and the right stick scrolls and moves no cursor.
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .advance_by(std::time::Duration::from_millis(100));
+        app.world_mut().resource_mut::<Laser>().on_panel = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Runtime>().machine.mode(),
+            Mode::Cursor
+        );
+        hold(&mut app, &["PADRTRIGGER"]);
+        app.update();
+        assert!(bindings(&app).is_empty(), "a click, not a layer");
+        assert_eq!(clicks(&app), [(MouseButton::Left, ButtonState::Pressed)]);
+        hold(&mut app, &[]);
+        app.world_mut().resource_mut::<PadState>().right = Vec2::new(0.0, 1.0);
+        app.update();
+        assert_eq!(clicks(&app), [(MouseButton::Left, ButtonState::Released)]);
+        let wheel = |app: &App| -> Vec<f32> {
+            app.world()
+                .resource::<Messages<MouseWheel>>()
+                .iter_current_update_messages()
+                .map(|w| w.y)
+                .collect()
+        };
+        // 0.1 s at full travel is 1.2 notches: one now, the rest kept.
+        assert_eq!(wheel(&app), [1.0]);
+        assert_eq!(
+            app.world().resource::<Runtime>().cursor.owner,
+            cursor::Owner::Os,
+            "the stick that scrolls does not take the cursor"
+        );
+        assert_eq!(benilla_app::pointer::ui_cursor(&Window::default()), None);
+        // A stick at rest drops the 0.2 left over, then down scrolls down.
+        app.world_mut().resource_mut::<PadState>().right = Vec2::ZERO;
+        app.update();
+        assert!(wheel(&app).is_empty());
+        app.world_mut().resource_mut::<PadState>().right = Vec2::new(0.0, -1.0);
+        app.update();
+        assert_eq!(wheel(&app), [-1.0]);
+
+        // The same stick off the panel is the cursor again.
+        app.world_mut().resource_mut::<Laser>().on_panel = false;
+        app.world_mut().resource_mut::<PadState>().right = Vec2::new(1.0, 0.0);
+        app.world_mut().resource_mut::<Runtime>().machine = mode::Machine::default();
+        app.world_mut().resource_mut::<Runtime>().reading.targeting = true;
+        app.update();
+        assert!(wheel(&app).is_empty());
+        assert_eq!(
+            app.world().resource::<Runtime>().cursor.owner,
+            cursor::Owner::Pad
+        );
+    }
+
+    #[test]
+    fn a_routed_token_is_reported_with_where_it_went_and_the_mode_is_kept() {
+        let mut app = app();
+        app.world_mut().resource_mut::<RoutedTrace>().0 = true;
+        let routed = |app: &App| -> Vec<(&'static str, bool, String)> {
+            app.world()
+                .resource::<Messages<PadRouted>>()
+                .iter_current_update_messages()
+                .map(|r| (r.token, r.pressed, r.what.clone()))
+                .collect()
+        };
+        hold(&mut app, &["PAD1"]);
+        app.update();
+        // No UI in this harness, so the binding table resolves nothing.
+        assert_eq!(routed(&app), [("PAD1", true, "-".to_owned())]);
+        assert_eq!(app.world().resource::<PadMode>().0, Mode::Gameplay);
+
+        app.world_mut().resource_mut::<Laser>().on_panel = true;
+        hold(&mut app, &["PAD1", "PADRTRIGGER"]);
+        app.update();
+        assert_eq!(app.world().resource::<PadMode>().0, Mode::Cursor);
+        assert_eq!(
+            routed(&app),
+            [("PADRTRIGGER", true, "cursor:Left".to_owned())]
+        );
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(
+            routed(&app),
+            [
+                ("PAD1", false, "binding".to_owned()),
+                ("PADRTRIGGER", false, "cursor".to_owned())
+            ]
         );
     }
 
