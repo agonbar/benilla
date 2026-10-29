@@ -17,10 +17,17 @@
 //!                            # left stick the only cursor stick, and then no stick leaves cursor mode
 //! cursor_speed = 1100.0      # cursor pixels per second at full deflection
 //! ui_scale = "off"           # "deck" sets the UI scale for a 1280x800 screen, or a number
+//! soft_range = 41.0          # yards: how far the soft target looks for a unit
+//! soft_object_range = 10.0   # yards: how far for a corpse or an object
+//! soft_arc = 40.0            # degrees either side of the camera's forward
+//! soft_margin = 0.25         # a challenger must score this fraction better than the holder...
+//! soft_switch_ms = 150       # ...for this long before the soft target moves to it
 //! ```
 
 use bevy::prelude::*;
 use serde::Deserialize;
+
+use benilla_app::SoftTargetConfig;
 
 use crate::tokens;
 
@@ -81,6 +88,8 @@ pub struct PadConfig {
     pub cursor_speed: f32,
     /// The `uiScale` to set at world entry, if the player asked for one.
     pub ui_scale: Option<f32>,
+    /// The soft target's dials, handed to `benilla-app` at start.
+    pub soft: SoftTargetConfig,
 }
 
 impl Default for PadConfig {
@@ -99,6 +108,7 @@ impl Default for PadConfig {
             cursor_stick: CursorStick::Right,
             cursor_speed: 1100.0,
             ui_scale: None,
+            soft: SoftTargetConfig::default(),
         }
     }
 }
@@ -119,6 +129,11 @@ struct File {
     cursor_stick: Option<String>,
     cursor_speed: Option<f32>,
     ui_scale: Option<toml::Value>,
+    soft_range: Option<f32>,
+    soft_object_range: Option<f32>,
+    soft_arc: Option<f32>,
+    soft_margin: Option<f32>,
+    soft_switch_ms: Option<f32>,
 }
 
 impl PadConfig {
@@ -186,6 +201,42 @@ impl PadConfig {
             20_000.0,
             &mut cfg.cursor_speed,
         );
+        range(
+            "soft_range",
+            file.soft_range,
+            5.0,
+            100.0,
+            &mut cfg.soft.range,
+        );
+        range(
+            "soft_object_range",
+            file.soft_object_range,
+            2.0,
+            40.0,
+            &mut cfg.soft.object_range,
+        );
+        range(
+            "soft_arc",
+            file.soft_arc,
+            5.0,
+            90.0,
+            &mut cfg.soft.arc_degrees,
+        );
+        range(
+            "soft_margin",
+            file.soft_margin,
+            0.0,
+            0.9,
+            &mut cfg.soft.margin,
+        );
+        if let Some(ms) = file.soft_switch_ms {
+            let mut secs = cfg.soft.switch_secs;
+            range("soft_switch_ms", Some(ms), 0.0, 2000.0, &mut secs);
+            // `range` wrote the number as it was given, in milliseconds.
+            if (0.0..=2000.0).contains(&ms) {
+                cfg.soft.switch_secs = ms / 1000.0;
+            }
+        }
         if let Some(t) = &file.presentation {
             match t.to_ascii_lowercase().as_str() {
                 "auto" => cfg.presentation = Presentation::Auto,
@@ -320,6 +371,29 @@ mod tests {
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert_eq!(cfg.presentation, Presentation::Auto);
         assert_eq!(cfg.ui_scale, None);
+    }
+
+    #[test]
+    fn the_soft_target_dials_parse_and_milliseconds_become_seconds() {
+        assert_eq!(PadConfig::parse("").0.soft, SoftTargetConfig::default());
+        let (cfg, problems) = PadConfig::parse(
+            "soft_range = 30\nsoft_arc = 25\nsoft_margin = 0.4\nsoft_switch_ms = 250\nsoft_object_range = 1",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(cfg.soft.range, 30.0);
+        assert_eq!(cfg.soft.arc_degrees, 25.0);
+        assert_eq!(cfg.soft.margin, 0.4);
+        assert_eq!(cfg.soft.switch_secs, 0.25);
+        assert_eq!(
+            cfg.soft.object_range,
+            SoftTargetConfig::default().object_range
+        );
+        let (cfg, problems) = PadConfig::parse("soft_switch_ms = 99999");
+        assert_eq!(problems.len(), 1);
+        assert_eq!(
+            cfg.soft.switch_secs,
+            SoftTargetConfig::default().switch_secs
+        );
     }
 
     #[test]

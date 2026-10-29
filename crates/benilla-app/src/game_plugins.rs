@@ -823,6 +823,13 @@ pub(crate) mod schedule_tests {
     ///   `act_on_right_click` and the cursor classifier already pair with: it runs the click's
     ///   dispatchers over the classifier's reading of its object, and its attack leg
     ///   selects as the click does, so it writes `Selection` where the click's drain does;
+    /// - the soft target's passes (`target::soft::update_soft`, `publish_soft`, `apply_soft_input`)
+    ///   against `benilla_world`'s `publish_camera_pose` and `finish_colliders`, which are
+    ///   crate-private, and against the drains `act_on_interact` already pairs with (chat, party,
+    ///   duel, trade, craft, petition, the GameObject openers, the death drain, the portrait sync
+    ///   and the item-cast commit): the passes read the camera and the colliders level-triggered,
+    ///   so a pose a frame old re-ranks next frame, and a lock or interact writes `Selection` and
+    ///   the interact message the way the click's drain does;
     /// - the soulstone's cast cancel (`death::drain_death`, through `spell::SelfCancel`) against
     ///   `cursor::drive_displayed_cursor` over `SpellTargeting` and
     ///   `creature_anim::spell_visual::route_cast_visuals` over the `CastEvent` messages: both are
@@ -839,7 +846,7 @@ pub(crate) mod schedule_tests {
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 3_348;
+    const UPDATE_ACTIONABLE_CEILING: usize = 3_360;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

@@ -8,7 +8,8 @@
 //! pad button is bound, rebound and saved like a key. The pad plays in one of two modes
 //! ([`mode`]): gameplay, where the right stick feeds the camera as a held mouselook ([`look`]), and
 //! cursor, where a virtual cursor ([`cursor`]) clicks, snaps and scrolls through the UI by synthetic
-//! mouse input ([`actions`]) and the pointer seam of `benilla_app::pointer`. The bars show pad
+//! mouse input ([`actions`]) and the pointer seam of `benilla_app::pointer`. In gameplay mode the
+//! bumpers lock the next friend or enemy and interact through the soft target ([`soft`]). The bars show pad
 //! glyphs ([`glyphs`], the addon of [`addon`]) by the presentation setting ([`presentation`]). The
 //! pad's own settings are `pad.toml` ([`config`]).
 //!
@@ -26,6 +27,7 @@ mod look;
 mod mode;
 mod panels;
 mod presentation;
+mod soft;
 mod tokens;
 mod trace;
 
@@ -39,7 +41,7 @@ use bevy::input::{ButtonState, InputSystems};
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
-use benilla_app::{AppExit, BindingKeyInput, BuildId, CoverUp};
+use benilla_app::{AppExit, BindingKeyInput, BuildId, CoverUp, SoftTargetInput, SoftTargetReady};
 use benilla_ui::script::UiScript;
 
 use actions::Act;
@@ -84,6 +86,7 @@ impl Plugin for PadPlugin {
 
         let cfg = PadConfig::load();
         app.insert_resource(PadDevice::new(cfg.clone()))
+            .insert_resource(cfg.soft)
             .insert_resource(cfg)
             .init_resource::<PadState>()
             .init_resource::<Runtime>()
@@ -91,6 +94,7 @@ impl Plugin for PadPlugin {
                 std::env::var_os("WOW_PAD_TRACE").is_some_and(|v| v != "0"),
             ))
             .add_message::<BindingKeyInput>()
+            .add_message::<SoftTargetInput>()
             // Before `InputSystems`: the motion, buttons and keys the pad writes are accumulated
             // there, and the `BindingKeyInput`s are read by the dispatch in `Update`.
             .add_systems(
@@ -99,7 +103,9 @@ impl Plugin for PadPlugin {
                     read_pad,
                     read_world,
                     step_mode,
+                    drive_soft,
                     route_keys,
+                    take_asks,
                     drive_cursor,
                     drive_look,
                     push_state,
@@ -137,6 +143,8 @@ struct Runtime {
     acts: Vec<Act>,
     /// The OS cursor is hidden because the pad's is drawn.
     hid: bool,
+    /// The soft target was last told to run.
+    soft_on: bool,
     pushed: Pushed,
 }
 
@@ -153,6 +161,8 @@ enum Routed {
     Binding,
     /// Taken by the cursor; a button's release undoes its press.
     Cursor(Option<Act>),
+    /// A targeting press ([`soft`]): nothing is held, so its release does nothing.
+    Soft,
 }
 
 #[derive(Default)]
@@ -283,6 +293,58 @@ fn step_mode(
     }
 }
 
+/// Tells the soft target when the pad plays in gameplay mode, which is when it runs.
+fn drive_soft(
+    device: Res<PadDevice>,
+    trace: Res<Trace>,
+    mut rt: ResMut<Runtime>,
+    mut out: MessageWriter<SoftTargetInput>,
+) {
+    let on = wants_look(rt.world, rt.machine.mode(), device.connected());
+    if on != rt.soft_on {
+        rt.soft_on = on;
+        out.write(SoftTargetInput::Active(on));
+        if trace.0 {
+            info!("pad: soft target {}", if on { "on" } else { "off" });
+        }
+    }
+}
+
+/// The interact commands, `INTERACTTARGET` and `INTERACTORJUMP`, whose bodies in the shipped addon
+/// queue an ask ([`soft::asks`]). A key or a pad button bound to either lands here, one frame after
+/// the binding ran. An interact goes to the soft target; the contextual one with nothing in front
+/// runs the `JUMP` command, so a rebound or edited jump is the player's own.
+fn take_asks(
+    script: Option<NonSend<UiScript>>,
+    ready: Option<Res<SoftTargetReady>>,
+    trace: Res<Trace>,
+    mut out: MessageWriter<SoftTargetInput>,
+) {
+    let Some(script) = script else {
+        return;
+    };
+    let Ok(Some(text)) = script.eval::<Option<String>>(soft::TAKE_ASKS) else {
+        return;
+    };
+    let ready = ready.is_some_and(|r| r.0);
+    for ask in soft::asks(&text) {
+        let action = soft::ask_action(ask, ready);
+        if trace.0 {
+            info!("pad: {ask:?} (service in front: {ready}) -> {action:?}");
+        }
+        match action {
+            Some(input) => {
+                out.write(input);
+            }
+            None => {
+                if let Err(e) = script.execute_binding("JUMP", true) {
+                    warn!("pad: JUMP: {e}");
+                }
+            }
+        }
+    }
+}
+
 /// The tokens that went down and up between two states, in token order.
 fn edges(
     prev: &BTreeSet<&'static str>,
@@ -304,6 +366,7 @@ fn route_keys(
     script: Option<NonSend<UiScript>>,
     mut rt: ResMut<Runtime>,
     mut out: MessageWriter<BindingKeyInput>,
+    mut soft_out: MessageWriter<SoftTargetInput>,
 ) {
     let rt = &mut *rt;
     if rt.prev_down == *state.down() {
@@ -330,6 +393,7 @@ fn route_keys(
                 rt.acts.extend(act.and_then(actions::release));
                 "cursor"
             }
+            Some(Routed::Soft) => "soft",
             // Pressed while the pad was not looking (a stick direction the dead zone made up).
             None => continue,
         };
@@ -349,6 +413,27 @@ fn route_keys(
         }
         if token == "PADBACK" {
             continue;
+        }
+        if !cursor_mode {
+            if let Some(press) = soft::press(token, mods, state.down()) {
+                match press {
+                    soft::Press::Soft(input) => {
+                        soft_out.write(input);
+                    }
+                    party => {
+                        if let (Some(lua), Some(script)) = (party.lua(), script.as_ref()) {
+                            if let Err(e) = script.run_binding(&lua) {
+                                warn!("pad: {lua}: {e}");
+                            }
+                        }
+                    }
+                }
+                rt.routed.insert(token, Routed::Soft);
+                if trace.0 {
+                    info!("pad: {} down -> {press:?}", trace::chord_text(mods, token));
+                }
+                continue;
+            }
         }
         out.write(BindingKeyInput {
             token,
@@ -666,6 +751,7 @@ mod tests {
             .add_message::<MouseButtonInput>()
             .add_message::<MouseWheel>()
             .add_message::<KeyboardInput>()
+            .add_message::<SoftTargetInput>()
             .init_resource::<PadState>()
             .init_resource::<Runtime>()
             .init_resource::<ButtonInput<MouseButton>>()
@@ -833,6 +919,28 @@ mod tests {
             Mode::Gameplay
         );
         assert_eq!(benilla_app::pointer::ui_cursor(&Window::default()), None);
+
+        // A ground spell: the armed targeting cursor is cursor mode, a left click commits it at the
+        // cursor, and putting the cursor away is gameplay mode again.
+        app.world_mut().resource_mut::<Runtime>().reading.targeting = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Runtime>().machine.mode(),
+            Mode::Cursor
+        );
+        hold(&mut app, &["PAD3"]);
+        app.update();
+        assert_eq!(clicks(&app), [(MouseButton::Left, ButtonState::Pressed)]);
+        assert!(bindings(&app).is_empty(), "a click, not the bar slot");
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(clicks(&app), [(MouseButton::Left, ButtonState::Released)]);
+        app.world_mut().resource_mut::<Runtime>().reading.targeting = false;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Runtime>().machine.mode(),
+            Mode::Gameplay
+        );
     }
 
     #[test]
@@ -859,6 +967,153 @@ mod tests {
         });
         app.update();
         assert_eq!(look(&app), presentation::Look::Kbm);
+    }
+
+    fn soft_inputs(app: &App) -> Vec<SoftTargetInput> {
+        let m = app.world().resource::<Messages<SoftTargetInput>>();
+        m.iter_current_update_messages().copied().collect()
+    }
+
+    #[test]
+    fn the_bumpers_lock_and_interact_in_gameplay_mode_and_scroll_in_cursor_mode() {
+        use benilla_app::SoftSide;
+        let mut app = app();
+        hold(&mut app, &["PADLSHOULDER"]);
+        app.update();
+        assert_eq!(
+            soft_inputs(&app),
+            [SoftTargetInput::Cycle(SoftSide::Friend)]
+        );
+        assert!(bindings(&app).is_empty(), "no bound command any more");
+        hold(&mut app, &[]);
+        app.update();
+        assert!(soft_inputs(&app).is_empty() && bindings(&app).is_empty());
+
+        hold(&mut app, &["PADRSHOULDER"]);
+        app.update();
+        assert_eq!(soft_inputs(&app), [SoftTargetInput::Cycle(SoftSide::Enemy)]);
+        hold(&mut app, &[]);
+        app.update();
+
+        // The left trigger is a layer, and under it the right bumper is the bound
+        // `INTERACTTARGET`: a binding, not a lock.
+        hold(&mut app, &["PADLTRIGGER", "PADRSHOULDER"]);
+        app.update();
+        assert!(soft_inputs(&app).is_empty(), "no lock under a layer");
+        assert!(bindings(&app).contains(&("PADRSHOULDER", true)));
+
+        // With a window open the bumpers are the cursor's wheel and target nothing.
+        hold(&mut app, &[]);
+        app.update();
+        open(&mut app, &["ContainerFrame1"]);
+        app.update();
+        hold(&mut app, &["PADRSHOULDER"]);
+        app.update();
+        assert!(soft_inputs(&app).is_empty());
+    }
+
+    #[test]
+    fn the_d_pad_under_the_left_bumper_and_trigger_targets_a_party_member() {
+        let mut app = app();
+        let script = UiScript::new().expect("construct UiScript");
+        script
+            .run("UNITS = '' function TargetUnit(u) UNITS = UNITS .. u .. ',' end")
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let units = |app: &App| {
+            app.world()
+                .non_send_resource::<UiScript>()
+                .eval::<String>("return UNITS")
+                .unwrap()
+        };
+        hold(&mut app, &["PADLTRIGGER", "PADLSHOULDER"]);
+        app.update();
+        assert!(
+            soft_inputs(&app).is_empty(),
+            "opening the layer locks nothing"
+        );
+        assert_eq!(units(&app), "");
+        hold(&mut app, &["PADLTRIGGER", "PADLSHOULDER", "PADDRIGHT"]);
+        app.update();
+        assert_eq!(units(&app), "party2,");
+        assert!(
+            !bindings(&app).iter().any(|(t, _)| *t == "PADDRIGHT"),
+            "not a bar slot"
+        );
+        hold(&mut app, &["PADLTRIGGER", "PADLSHOULDER"]);
+        app.update();
+        assert_eq!(units(&app), "party2,", "the release does nothing");
+
+        // Out of the layer the same button is its bar slot.
+        hold(&mut app, &["PADDRIGHT"]);
+        app.update();
+        assert!(bindings(&app).contains(&("PADDRIGHT", true)));
+        assert_eq!(units(&app), "party2,");
+    }
+
+    #[test]
+    fn the_soft_target_runs_with_gameplay_mode_and_only_then() {
+        use bevy::input::gamepad::{GamepadConnection, GamepadConnectionEvent};
+        let mut app = app();
+        // A UI to play in: without a script the pad has no world.
+        app.insert_non_send_resource(UiScript::new().expect("construct UiScript"));
+        let mut device = PadDevice::new(PadConfig::default());
+        device.handle(
+            &RawGamepadEvent::Connection(GamepadConnectionEvent::new(
+                Entity::from_raw_u32(7).expect("a valid index"),
+                GamepadConnection::Connected {
+                    name: "pad".into(),
+                    vendor_id: None,
+                    product_id: None,
+                },
+            )),
+            0.0,
+        );
+        app.insert_resource(device)
+            .add_systems(Update, drive_soft.after(step_mode));
+        app.world_mut().resource_mut::<Runtime>().world = true;
+        app.update();
+        assert_eq!(soft_inputs(&app), [SoftTargetInput::Active(true)]);
+        app.update();
+        assert!(soft_inputs(&app).is_empty(), "told once, not every frame");
+        open(&mut app, &["CharacterFrame"]);
+        app.update();
+        assert_eq!(soft_inputs(&app), [SoftTargetInput::Active(false)]);
+        open(&mut app, &[]);
+        app.update();
+        assert_eq!(soft_inputs(&app), [SoftTargetInput::Active(true)]);
+    }
+
+    /// The carried review note of the cursor phase: with the left stick as the cursor stick, a left
+    /// deflection moves the cursor and must not end cursor mode, which with the right stick as the
+    /// cursor it does (a walk).
+    #[test]
+    fn step_mode_keeps_cursor_mode_on_a_left_deflection_when_the_left_stick_is_the_cursor() {
+        let deflect = |app: &mut App| {
+            app.world_mut().resource_mut::<PadState>().left = Vec2::new(1.0, 0.0);
+            app.update();
+        };
+        let mode = |app: &App| app.world().resource::<Runtime>().machine.mode();
+
+        let mut left = app();
+        left.world_mut().resource_mut::<PadConfig>().cursor_stick = CursorStick::Left;
+        open(&mut left, &["ContainerFrame1"]);
+        left.update();
+        assert_eq!(mode(&left), Mode::Cursor);
+        deflect(&mut left);
+        assert_eq!(mode(&left), Mode::Cursor, "the left stick is the cursor");
+        for _ in 0..5 {
+            left.update();
+            assert_eq!(mode(&left), Mode::Cursor);
+        }
+
+        // The same deflection with the right stick as the cursor is a walk.
+        let mut right = app();
+        open(&mut right, &["ContainerFrame1"]);
+        right.update();
+        assert_eq!(mode(&right), Mode::Cursor);
+        deflect(&mut right);
+        assert_eq!(mode(&right), Mode::Gameplay);
     }
 
     #[test]

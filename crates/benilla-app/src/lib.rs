@@ -204,7 +204,7 @@ pub use bindings::{register_default_bindings, register_key_tokens, BindingKeyInp
 pub use camera_shake::NoCameraShake;
 pub use net::Objects;
 pub use pointer::Aim;
-pub use target::Interact;
+pub use target::{Interact, SoftSide, SoftTargetConfig, SoftTargetInput, SoftTargetReady};
 
 /// Builds and runs the client app. `build` is the launcher's compile-time git stamp, passed in as
 /// data so the sha lives in the shim's fingerprint and a commit does not recompile this crate.

@@ -1,0 +1,8 @@
+<Bindings>
+	<Binding name="INTERACTTARGET" header="BENILLAPAD">
+		BenillaPadAsk("interact");
+	</Binding>
+	<Binding name="INTERACTORJUMP">
+		BenillaPadAsk("interactorjump");
+	</Binding>
+</Bindings>

@@ -2,6 +2,16 @@
 -- Written against the 1.12 API. benilla-input fills BenillaPadState (mode, cursor, presentation),
 -- BenillaPadGlyphs (token to label) and BenillaPadLayers (modifier to label) about ten times a second.
 
+-- The two commands of Bindings.xml. A body only asks; benilla-input takes the asks about once a
+-- frame, because whether there is something to interact with is the soft target's to say.
+BINDING_HEADER_BENILLAPAD = "Benilla Pad"
+BINDING_NAME_INTERACTTARGET = "Interact with Target"
+BINDING_NAME_INTERACTORJUMP = "Interact or Jump"
+BenillaPadAsks = nil
+function BenillaPadAsk(what)
+  BenillaPadAsks = (BenillaPadAsks or "") .. what .. " "
+end
+
 local GetBindingTextStock = GetBindingText
 
 local function controller()
