@@ -5,4 +5,10 @@
 	<Binding name="INTERACTORJUMP">
 		BenillaPadAsk("interactorjump");
 	</Binding>
+	<Binding name="RADIALRING" runOnUp="true">
+		if ( keystate == "down" ) then BenillaPadRingOpen(); else BenillaPadRingRelease(); end
+	</Binding>
+	<Binding name="TOGGLEPADKEYBOARD">
+		BenillaPadToggleKeyboard();
+	</Binding>
 </Bindings>
