@@ -11,7 +11,9 @@
 //! mouse input ([`actions`]) and the pointer seam of `benilla_app::pointer`. In gameplay mode the
 //! bumpers lock the next friend or enemy and interact through the soft target ([`soft`]). The bars show pad
 //! glyphs ([`glyphs`], the addon of [`addon`]) by the presentation setting ([`presentation`]). The
-//! pad's own settings are `pad.toml` ([`config`]).
+//! addon also draws a radial ring ([`ring`]) and an on-screen keyboard ([`keyboard`]), which reach
+//! the pad through `BenillaPad_*` functions ([`host`]); a long press of `PADBACK` ([`hold`]) shows
+//! the keyboard. The pad's own settings are `pad.toml` ([`config`]).
 //!
 //! Gamepad input is off in stock benilla (`benilla-world`'s `boot.rs` disables `GilrsPlugin`);
 //! [`run`] turns it back on from the plugin group's hook, so stock benilla stays as it is.
@@ -22,11 +24,15 @@ mod config;
 mod cursor;
 mod device;
 mod glyphs;
+mod hold;
+mod host;
+mod keyboard;
 mod layers;
 mod look;
 mod mode;
 mod panels;
 mod presentation;
+mod ring;
 mod soft;
 mod tokens;
 mod trace;
@@ -46,6 +52,7 @@ use benilla_ui::script::UiScript;
 
 use actions::Act;
 use config::CursorStick;
+use host::Host;
 use mode::Mode;
 
 pub use config::{Device, PadConfig, Presentation, Source};
@@ -90,6 +97,7 @@ impl Plugin for PadPlugin {
             .insert_resource(cfg)
             .init_resource::<PadState>()
             .init_resource::<Runtime>()
+            .init_resource::<Host>()
             .insert_resource(Trace(
                 std::env::var_os("WOW_PAD_TRACE").is_some_and(|v| v != "0"),
             ))
@@ -107,6 +115,7 @@ impl Plugin for PadPlugin {
                     route_keys,
                     take_asks,
                     drive_cursor,
+                    drive_text,
                     drive_look,
                     push_state,
                 )
@@ -135,7 +144,9 @@ struct Runtime {
     real_mouse: bool,
     /// Inputs the pad wrote last frame, which its readers must not take for the player's.
     own: Own,
-    back_was: bool,
+    back: hold::BackHold,
+    /// `PADBACK` was held long: the keyboard is to be shown or hidden.
+    toggle_keyboard: bool,
     left_was: bool,
     prev_down: BTreeSet<&'static str>,
     /// How each pressed token was routed, for its release.
@@ -259,20 +270,21 @@ fn step_mode(
     state: Res<PadState>,
     cfg: Res<PadConfig>,
     trace: Res<Trace>,
+    time: Res<Time<Real>>,
     mut rt: ResMut<Runtime>,
 ) {
-    let back = state.is_down("PADBACK");
+    let back = rt.back.step(state.is_down("PADBACK"), time.delta_secs());
+    rt.toggle_keyboard |= back == hold::Back::Long;
     let left = state.left != Vec2::ZERO;
     let signals = mode::Signals {
         panels: &rt.reading.panels.clone(),
         targeting: rt.reading.targeting,
-        back: back && !rt.back_was,
+        back: back == hold::Back::Tap,
         // Pushing the stick again is a walk; a stick already held when a window opened is not.
         walk: left && !rt.left_was && cfg.cursor_stick == CursorStick::Right,
     };
     let before = rt.machine.mode();
     let after = rt.machine.step(signals);
-    rt.back_was = back;
     rt.left_was = left;
     if trace.0 && before != after {
         info!(
@@ -635,6 +647,43 @@ fn show_os_cursor(rt: &mut Runtime, opts: &mut CursorOptions) {
     }
 }
 
+/// The on-screen keyboard: shown or hidden by a long press of `PADBACK`, and what its keys type
+/// written as keyboard input ([`keyboard::Typed`]). The pad's own key presses are counted, so
+/// typing does not read as the player's keyboard to the presentation setting.
+fn drive_text(
+    host: Res<Host>,
+    trace: Res<Trace>,
+    script: Option<NonSend<UiScript>>,
+    mut rt: ResMut<Runtime>,
+    window: Query<Entity, With<PrimaryWindow>>,
+    mut keys: MessageWriter<KeyboardInput>,
+) {
+    if std::mem::take(&mut rt.toggle_keyboard) {
+        if let Some(script) = script.as_ref() {
+            match script.run("BenillaPadToggleKeyboard()") {
+                Ok(()) if trace.0 => info!("pad: keyboard toggled"),
+                Ok(()) => {}
+                Err(e) => warn!("pad: keyboard: {e}"),
+            }
+        }
+    }
+    let typed = host.take_typed();
+    let Ok(entity) = window.single() else {
+        return;
+    };
+    for t in typed {
+        if trace.0 {
+            info!("pad: type {t:?}");
+        }
+        for event in t.events(entity) {
+            if event.state == ButtonState::Pressed {
+                rt.own.keys += 1;
+            }
+            keys.write(event);
+        }
+    }
+}
+
 /// Whether the pad holds a mouselook session: in gameplay mode with a pad to play it. With no pad
 /// connected the mouse owns the camera and the cursor.
 fn wants_look(world: bool, mode: Mode, connected: bool) -> bool {
@@ -649,6 +698,7 @@ fn drive_look(
     trace: Res<Trace>,
     time: Res<Time<Real>>,
     cover: CoverUp,
+    host: Res<Host>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut rt: ResMut<Runtime>,
     mut session: Local<look::Session>,
@@ -675,7 +725,8 @@ fn drive_look(
             }
         }
     }
-    if session.open && want && !covered {
+    // The ring's stick picks an entry; the camera stays where it is while the ring is open.
+    if session.open && want && !covered && !host.ring_open() {
         let delta = look::motion(state.right, &cfg, dt);
         if delta != Vec2::ZERO {
             motion.write(MouseMotion { delta });
@@ -689,15 +740,26 @@ fn push_state(
     cfg: Res<PadConfig>,
     device: Res<PadDevice>,
     trace: Res<Trace>,
+    host: Res<Host>,
+    state: Res<PadState>,
     script: Option<NonSend<UiScript>>,
     mut rt: ResMut<Runtime>,
 ) {
+    host.set(state.left, state.right, rt.machine.mode() == Mode::Cursor);
     let Some(script) = script else {
         return;
     };
     let rt = &mut *rt;
     if rt.pushed.session != Some(script.session()) {
-        match script.run(&glyphs::lua_tables(&cfg)) {
+        if let Err(e) = host.install(script.lua()) {
+            warn!("pad: BenillaPad_* functions: {e}");
+            return;
+        }
+        match script.run(&format!(
+            "{} {}",
+            glyphs::lua_tables(&cfg),
+            ring::lua_table()
+        )) {
             Ok(()) => {
                 rt.pushed = Pushed {
                     session: Some(script.session()),
@@ -1123,5 +1185,157 @@ mod tests {
         let (up, down) = edges(&a, &b);
         assert_eq!(up, ["PAD1"]);
         assert_eq!(down, ["PAD3", "PAD4"]);
+    }
+    /// The movement tokens the bindings saw, per frame, with the ring's token left out.
+    fn movement(app: &App) -> Vec<(&'static str, bool)> {
+        bindings(app)
+            .into_iter()
+            .filter(|(t, _)| *t != "PADPADDLE1" && *t != "PADRSTICK")
+            .collect()
+    }
+
+    /// The ring is a held binding like any other: opening and closing it neither presses nor
+    /// releases a movement key, which comes from the pad's state every frame.
+    #[test]
+    fn a_movement_key_stays_held_through_an_open_and_closed_ring() {
+        let mut app = app();
+        hold(&mut app, &["PADLSTICKUP"]);
+        app.update();
+        assert_eq!(bindings(&app), [("PADLSTICKUP", true)]);
+        // The ring opens on a back button, with the stick still forward.
+        hold(&mut app, &["PADLSTICKUP", "PADPADDLE1"]);
+        app.update();
+        assert_eq!(bindings(&app), [("PADPADDLE1", true)]);
+        // Held open for frames, the stick drifting to a diagonal: only the new direction changes.
+        hold(&mut app, &["PADLSTICKUP", "PADLSTICKRIGHT", "PADPADDLE1"]);
+        app.update();
+        assert_eq!(movement(&app), [("PADLSTICKRIGHT", true)]);
+        hold(&mut app, &["PADLSTICKUP", "PADPADDLE1"]);
+        app.update();
+        assert_eq!(movement(&app), [("PADLSTICKRIGHT", false)]);
+        // Released: the ring's up, and the forward key is not touched.
+        hold(&mut app, &["PADLSTICKUP"]);
+        app.update();
+        assert_eq!(bindings(&app), [("PADPADDLE1", false)]);
+        hold(&mut app, &["PADLSTICKUP"]);
+        app.update();
+        assert!(bindings(&app).is_empty(), "still held, nothing sent");
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(bindings(&app), [("PADLSTICKUP", false)]);
+    }
+
+    /// The other default: under the left trigger the right stick's click opens the ring, as a
+    /// shifted chord whose release goes to the same binding.
+    #[test]
+    fn the_ring_opens_from_the_shifted_stick_click_and_its_release_follows_it() {
+        let mut app = app();
+        hold(&mut app, &["PADLTRIGGER", "PADRSTICK"]);
+        app.update();
+        let m = app.world().resource::<Messages<BindingKeyInput>>();
+        let sent: Vec<_> = m
+            .iter_current_update_messages()
+            .map(|b| (b.token, b.pressed, b.shift))
+            .collect();
+        assert!(sent.contains(&("PADRSTICK", true, true)), "{sent:?}");
+        // The trigger lets go first, the click after it: the release is still the click's own.
+        hold(&mut app, &["PADRSTICK"]);
+        app.update();
+        assert!(!bindings(&app).contains(&("PADRSTICK", false)));
+        hold(&mut app, &[]);
+        app.update();
+        assert!(bindings(&app).contains(&("PADRSTICK", false)));
+    }
+
+    #[test]
+    fn a_padback_tap_switches_the_mode_on_release_and_a_long_press_toggles_the_keyboard() {
+        let mut app = app();
+        app.init_resource::<Host>()
+            .add_systems(Update, drive_text.after(step_mode));
+        let script = UiScript::new().unwrap();
+        script
+            .run("Toggled = 0 function BenillaPadToggleKeyboard() Toggled = Toggled + 1 end")
+            .unwrap();
+        app.world_mut().insert_non_send_resource(script);
+        let mode = |app: &App| app.world().resource::<Runtime>().machine.mode();
+        let toggled = |app: &App| -> i32 {
+            let s = app.world().non_send_resource::<UiScript>();
+            s.eval("return Toggled").unwrap()
+        };
+        let step = |app: &mut App, secs: f32| {
+            app.world_mut()
+                .resource_mut::<Time<Real>>()
+                .advance_by(std::time::Duration::from_secs_f32(secs));
+        };
+
+        // A tap: nothing while it is down, the switch on release.
+        hold(&mut app, &["PADBACK"]);
+        step(&mut app, 0.05);
+        app.update();
+        assert_eq!(mode(&app), Mode::Gameplay);
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(mode(&app), Mode::Cursor);
+        assert_eq!(toggled(&app), 0);
+
+        // A long press: the keyboard, once, and neither the hold nor the release switches the mode.
+        hold(&mut app, &["PADBACK"]);
+        app.update();
+        step(&mut app, 0.4);
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(toggled(&app), 1, "once, however long it is held");
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(
+            mode(&app),
+            Mode::Cursor,
+            "the release of a long press is not a tap"
+        );
+        assert_eq!(toggled(&app), 1);
+    }
+
+    #[test]
+    fn what_the_keyboard_types_is_written_as_keyboard_input_and_is_not_the_players() {
+        let mut app = app();
+        app.init_resource::<Host>()
+            .add_systems(Update, drive_text.after(step_mode));
+        let script = UiScript::new().unwrap();
+        app.world()
+            .resource::<Host>()
+            .install(script.lua())
+            .unwrap();
+        script
+            .run("BenillaPad_Type(\"h\") BenillaPad_Key(\"ENTER\")")
+            .unwrap();
+        app.world_mut().insert_non_send_resource(script);
+        hold(&mut app, &["PAD3"]);
+        app.update();
+        let keys: Vec<_> = app
+            .world()
+            .resource::<Messages<KeyboardInput>>()
+            .iter_current_update_messages()
+            .map(|k| (k.state, k.text.as_deref().map(str::to_owned)))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (ButtonState::Pressed, Some("h".to_owned())),
+                (ButtonState::Released, None),
+                (ButtonState::Pressed, None),
+                (ButtonState::Released, None),
+            ]
+        );
+        assert_eq!(app.world().resource::<Runtime>().own.keys, 2);
+        // They come back through the reader next frame and do not flip the presentation.
+        app.update();
+        let look = app
+            .world()
+            .resource::<Runtime>()
+            .auto
+            .resolve(Presentation::Auto, true);
+        assert_eq!(look, presentation::Look::Controller);
+        assert!(app.world().resource::<Host>().take_typed().is_empty());
     }
 }

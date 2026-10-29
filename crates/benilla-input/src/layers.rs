@@ -90,6 +90,10 @@ pub fn default_bindings() -> Vec<(String, String)> {
         // left trigger and the right bumper interact.
         ("SHIFT-PADRSHOULDER", "INTERACTTARGET"),
         ("PADFORWARD", "TOGGLEGAMEMENU"),
+        // The radial ring, held. The back buttons are what a Steam Input layout maps there; the
+        // right stick's click under the left trigger is the one every pad has.
+        ("PADPADDLE1", "RADIALRING"),
+        ("SHIFT-PADRSTICK", "RADIALRING"),
     ] {
         out.push((key.to_owned(), command.to_owned()));
     }

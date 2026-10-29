@@ -1,4 +1,6 @@
 ## Interface: 11200
 ## Title: Benilla Pad
-## Notes: Pad glyphs on the bars and the pad's cursor. Written by benilla-input; edits are overwritten.
+## Notes: Pad glyphs on the bars, the pad's cursor, the radial ring and the on-screen keyboard. Written by benilla-input; edits are overwritten.
 BenillaPad.lua
+Ring.lua
+Keyboard.lua

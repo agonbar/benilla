@@ -9,7 +9,8 @@ use std::collections::BTreeSet;
 pub const POLL: f32 = 0.1;
 
 /// Returns the open windows' names joined with commas, then whether a targeting cursor is armed.
-/// A window is a `UIPanelWindows` entry, a bag (`ContainerFrame1..13`) or a static popup, shown.
+/// A window is a `UIPanelWindows` entry, a bag (`ContainerFrame1..13`), a static popup or the
+/// pad's keyboard, shown.
 const CHUNK: &str = r#"
 local open = ""
 local function note(name)
@@ -21,6 +22,7 @@ if UIPanelWindows then
 end
 for i = 1, 13 do note("ContainerFrame" .. i) end
 for i = 1, 4 do note("StaticPopup" .. i) end
+note("BenillaPadKeyboard")
 local targeting = 0
 if SpellIsTargeting and SpellIsTargeting() then targeting = 1 end
 return open, targeting
