@@ -200,6 +200,20 @@ fn a_second_press_without_a_release_does_not_latch_twice() {
 
 #[test]
 fn registered_defaults_join_the_players_and_stay_out_of_the_saved_diff() {
+    // The list is process-wide and later seeds in this binary read it, so the test puts back
+    // what it found, even when it fails.
+    struct Restore(Vec<(String, String)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            *EXT_DEFAULTS.lock().unwrap_or_else(|e| e.into_inner()) = std::mem::take(&mut self.0);
+        }
+    }
+    let _restore = Restore(
+        EXT_DEFAULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
+    );
     register_default_bindings(&[("PAD2", "TAP")]);
     let defaults = with_ext_defaults(vec![("W".into(), "MOVEFORWARD".into())]);
     assert!(defaults.contains(&("W".into(), "MOVEFORWARD".into())));

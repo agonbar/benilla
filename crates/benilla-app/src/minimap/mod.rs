@@ -634,7 +634,7 @@ fn emit_minimap(
             );
         }
         let win = window.iter().next();
-        let cursor = win.and_then(|w| w.cursor_position());
+        let cursor = win.and_then(crate::pointer::ui_cursor);
         let seam = win.map_or(1.0, |w| crate::ui_script::seam_scale(w.height()));
         // The pan origin snapped to a half-logical-pixel grid: every blip offset and rim bearing
         // derives from `wx`/`wy`, so the layer steps together instead of rewriting the batch mesh

@@ -1,16 +1,15 @@
-//! The right stick as the camera: a held mouselook session that feeds `MouseMotion`. The session
-//! opens with `MouselookStart` when the stick leaves its dead zone and closes with `MouselookStop`
-//! once the stick has rested for [`REST`] seconds, so a stick brushing the zone does not open and
-//! close it every frame, and the OS cursor is free whenever the stick is. Deviation from a
-//! session held for the whole of gameplay: until the cursor mode of a later phase exists, a locked
-//! cursor would take the mouse away from the player.
+//! The right stick as the camera: gameplay mode ([`crate::mode`]) holds a mouselook session for as
+//! long as it lasts, opened with `MouselookStart` and closed with `MouselookStop`, and the stick
+//! feeds `MouseMotion` into it. The OS cursor stays locked and hidden for the whole session, so it
+//! never flickers between frames.
+//!
+//! `MouselookStop` also ends a right-button look that is still held, as it does in 1.12.1, so the
+//! stop waits for the mouse's right button to come up: a session closing must not cut off a drag
+//! the player's trackpad is making.
 
 use bevy::prelude::*;
 
 use crate::config::PadConfig;
-
-/// Seconds the stick rests before the session closes.
-pub const REST: f32 = 0.4;
 
 /// What the session does this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,28 +18,24 @@ pub enum Call {
     Stop,
 }
 
-/// Whether we hold a mouselook session open, and for how long the stick has rested.
+/// Whether we hold a mouselook session open.
 #[derive(Default)]
 pub struct Session {
     pub open: bool,
-    rested: f32,
 }
 
 impl Session {
-    /// One frame: the call to make, if any. `deflected` is whether the stick is out of its dead
-    /// zone, `covered` whether the loading cover is up, `dt` the frame's seconds. Under the cover
-    /// the stick counts as at rest: a mouse cannot open a look there, so the stick does not either,
-    /// and a session already open closes.
-    pub fn step(&mut self, deflected: bool, covered: bool, dt: f32) -> Option<Call> {
-        if deflected && !covered {
-            self.rested = 0.0;
-            return (!self.open).then_some(Call::Start);
+    /// One frame: the call to make, if any. `want` is whether gameplay mode wants a session,
+    /// `covered` whether the loading cover is up (a mouse cannot open a look there, so the pad
+    /// does not either, and a session already open closes), `right_held` whether the mouse's right
+    /// button is down.
+    pub fn step(&mut self, want: bool, covered: bool, right_held: bool) -> Option<Call> {
+        let want = want && !covered;
+        match (want, self.open) {
+            (true, false) => Some(Call::Start),
+            (false, true) if !right_held => Some(Call::Stop),
+            _ => None,
         }
-        if !self.open {
-            return None;
-        }
-        self.rested += dt;
-        (self.rested >= REST).then_some(Call::Stop)
     }
 }
 
@@ -63,37 +58,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_session_opens_once_and_closes_after_the_stick_rests() {
+    fn the_session_opens_once_and_closes_when_gameplay_mode_ends() {
         let mut s = Session::default();
-        assert_eq!(s.step(true, false, 0.016), Some(Call::Start));
+        assert_eq!(s.step(true, false, false), Some(Call::Start));
         s.open = true;
-        assert_eq!(s.step(true, false, 0.016), None, "already open");
-        assert_eq!(s.step(false, false, 0.2), None);
-        assert_eq!(
-            s.step(true, false, 0.016),
-            None,
-            "a brush of the zone restarts the rest"
-        );
-        assert_eq!(s.step(false, false, 0.3), None);
-        assert_eq!(s.step(false, false, 0.2), Some(Call::Stop));
-    }
-
-    #[test]
-    fn the_cover_blocks_a_start_and_lets_an_open_session_close() {
-        let mut s = Session::default();
-        assert_eq!(s.step(true, true, 0.016), None, "no start under the cover");
-        assert_eq!(s.step(true, false, 0.016), Some(Call::Start));
-        s.open = true;
-        assert_eq!(s.step(true, true, 0.3), None);
-        assert_eq!(s.step(true, true, 0.2), Some(Call::Stop));
-    }
-
-    #[test]
-    fn a_closed_session_stays_quiet() {
-        let mut s = Session::default();
         for _ in 0..100 {
-            assert_eq!(s.step(false, false, 0.1), None);
+            assert_eq!(s.step(true, false, false), None, "held, however long");
         }
+        assert_eq!(s.step(false, false, false), Some(Call::Stop));
+        s.open = false;
+        assert_eq!(s.step(false, false, false), None);
+    }
+
+    #[test]
+    fn a_held_right_button_keeps_the_stop_back_until_it_comes_up() {
+        let mut s = Session { open: true };
+        assert_eq!(
+            s.step(false, false, true),
+            None,
+            "the stop would end the mouse's drag"
+        );
+        assert_eq!(s.step(false, false, true), None);
+        assert_eq!(s.step(false, false, false), Some(Call::Stop));
+    }
+
+    #[test]
+    fn the_cover_blocks_a_start_and_closes_an_open_session() {
+        let mut s = Session::default();
+        assert_eq!(s.step(true, true, false), None, "no start under the cover");
+        assert_eq!(s.step(true, false, false), Some(Call::Start));
+        s.open = true;
+        assert_eq!(s.step(true, true, false), Some(Call::Stop));
     }
 
     #[test]

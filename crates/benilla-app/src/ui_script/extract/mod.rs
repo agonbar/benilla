@@ -1043,7 +1043,7 @@ pub(super) fn paint_script(
                 Some(benilla_ui::script::coin_icon(i64::from(m.copper)).to_string())
             }
         });
-        if let (Some(texture), Some(pos)) = (texture, window.cursor_position()) {
+        if let (Some(texture), Some(pos)) = (texture, crate::pointer::ui_cursor(window)) {
             if let Some(handle) = assets
                 .as_mut()
                 .and_then(|a| a.sprite_texture(&texture, &mut images))

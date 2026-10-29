@@ -1447,9 +1447,15 @@ fn apply_self_fade_to_descendants(
     }
 }
 
-/// True if the OS pointer is over the world camera's viewport (the whole window when it has none).
+/// True if the pointer (the seam's, else the OS's) is over the world camera's viewport (the whole
+/// window when it has none).
 fn cursor_in_viewport(window: &Window, camera: &Camera) -> bool {
-    let Some(cursor) = window.physical_cursor_position() else {
+    in_viewport(crate::pointer::physical_cursor(window), camera)
+}
+
+/// [`cursor_in_viewport`] for a physical-pixel `cursor`, which may be a pad's or a laser's.
+fn in_viewport(cursor: Option<Vec2>, camera: &Camera) -> bool {
+    let Some(cursor) = cursor else {
         return false;
     };
     match &camera.viewport {

@@ -76,6 +76,7 @@ mod perf;
 mod pipe_warm;
 mod player;
 mod poi_marker;
+pub mod pointer;
 mod portrait;
 #[cfg(feature = "dev")]
 mod preflight;
@@ -202,6 +203,7 @@ pub use benilla_protocol::{messages::ObjectType, ObjectFields};
 pub use bindings::{register_default_bindings, register_key_tokens, BindingKeyInput, CoverUp};
 pub use camera_shake::NoCameraShake;
 pub use net::Objects;
+pub use pointer::Aim;
 pub use target::Interact;
 
 /// Builds and runs the client app. `build` is the launcher's compile-time git stamp, passed in as
