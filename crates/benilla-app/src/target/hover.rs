@@ -39,10 +39,7 @@ pub(super) fn update_pick_occlusion(
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
+    let Some(ray) = crate::pointer::world_ray(camera, cam_tf, window) else {
         return;
     };
     occlusion.ray = Some(ray.direction);
@@ -249,17 +246,14 @@ pub(super) fn update_hover(
             return;
         }
     }
-    if rig.is_looking() || pointer_over_ui.0 {
+    if (rig.is_looking() && !crate::pointer::laser_aims()) || pointer_over_ui.0 {
         *last_pick = None;
         return;
     }
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
+    let Some(ray) = crate::pointer::world_ray(camera, cam_tf, window) else {
         return;
     };
     let (origin, dir) = (ray.origin, *ray.direction);
@@ -585,7 +579,7 @@ pub(super) fn update_hovered_object(
     hovered.guid = None;
     hovered.distance = f32::MAX;
     // The sticky pick drops the moment the pointer is not ours.
-    let yielded = rig.is_looking() || pointer_over_ui.0;
+    let yielded = (rig.is_looking() && !crate::pointer::laser_aims()) || pointer_over_ui.0;
     if yielded {
         *last_pick = None;
     }
@@ -604,14 +598,11 @@ pub(super) fn update_hovered_object(
     if yielded {
         return;
     }
-    let Some(cursor) = window.cursor_position().or(probe_aim) else {
-        return;
-    };
     if pickable.is_empty() {
         *last_pick = None;
         return;
     }
-    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
+    let Some(ray) = crate::pointer::world_ray(camera, cam_tf, window) else {
         return;
     };
     let self_store = self_q.single().ok();
@@ -714,7 +705,8 @@ pub(super) fn update_hovered_object(
     let Some((distance, net_entity)) = picked else {
         if probing {
             cache.report.say(format!(
-                "aim {cursor:?} — no GameObject hit (pickable {})",
+                "aim {:?} — no GameObject hit (pickable {})",
+                ray.direction,
                 pickable.len()
             ));
         }

@@ -12,6 +12,7 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_mod_openxr::spaces::OxrSpaceLocationFlags;
+use bevy_mod_xr::session::XrTrackingRoot;
 use bevy_mod_xr::spaces::XrSpaceSyncSet;
 
 use benilla_app::pointer::{self, Aim};
@@ -23,6 +24,10 @@ use crate::session_running;
 
 /// How long the beam is while it hits nothing, in the root's units.
 pub const MISS_LENGTH: f32 = 0.4;
+/// The longest the beam runs to a world hit; the marker is still at the hit, only the beam stops.
+pub const REACH: f32 = 40.0;
+/// The marker's size at one unit away, so it keeps its angular size as the hit moves off.
+const MARKER_SIZE: f32 = 0.012;
 /// The beam's width.
 const BEAM_WIDTH: f32 = 0.003;
 
@@ -73,13 +78,30 @@ pub struct Aimed {
     /// The controller is located.
     pub tracked: bool,
     pub hit: Option<PanelHit>,
+    /// What the ray meets in the world, off the panel: how far, and whether it is a unit or object
+    /// the player can act on.
+    pub world: Option<pointer::Hit>,
+    /// The world ray the picks cast, while the tracking root's transform is known.
+    pub ray: Option<Ray3d>,
 }
 
 impl Aimed {
-    /// The beam's length: to the hit, else a stub.
+    /// The beam's length: to the panel, else to the world hit, else a stub.
     pub fn length(&self) -> f32 {
-        self.hit.map_or(MISS_LENGTH, |h| h.distance)
+        match (self.hit, self.world) {
+            (Some(h), _) => h.distance,
+            (None, Some(w)) => w.distance.min(REACH),
+            (None, None) => MISS_LENGTH,
+        }
     }
+}
+
+/// The aim ray in world space, from the hand's pose in the tracking root and the root's world
+/// transform. `None` for a pose whose forward is not a direction.
+pub fn ray_in_world(root: &Affine3A, pose: &Transform) -> Option<Ray3d> {
+    let origin = root.transform_point3(pose.translation);
+    let direction = root.transform_vector3(pose.rotation * Vec3::NEG_Z);
+    Some(Ray3d::new(origin, Dir3::new(direction).ok()?))
 }
 
 /// The right hand's `aim` pose, a child of the tracking root.
@@ -89,6 +111,10 @@ pub(crate) struct AimHand;
 /// The beam, a child of [`AimHand`].
 #[derive(Component)]
 struct Beam;
+
+/// Where the beam ends on a world hit, a child of [`AimHand`].
+#[derive(Component)]
+struct Marker;
 
 pub struct LaserPlugin;
 
@@ -105,7 +131,7 @@ impl Plugin for LaserPlugin {
                 )
                     .chain(),
             )
-            .add_systems(Update, shape_beam);
+            .add_systems(Update, (aim_world, shape_beam, shape_marker).chain());
     }
 }
 
@@ -145,9 +171,24 @@ fn spawn_hand(
         RenderLayers::layer(PANEL_RENDER_LAYER),
         NoFrustumCulling,
     );
+    let marker = (
+        Marker,
+        Mesh3d(meshes.add(Sphere::new(1.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.85, 0.35),
+            unlit: true,
+            fog_enabled: false,
+            ..default()
+        })),
+        Transform::default(),
+        Visibility::Hidden,
+        RenderLayers::layer(PANEL_RENDER_LAYER),
+        NoFrustumCulling,
+    );
     commands
         .spawn((Name::new("vr laser hand"), AimHand, space))
-        .with_child(beam);
+        .with_child(beam)
+        .with_child(marker);
 }
 
 /// The session ended: the hand's space went with it.
@@ -160,6 +201,7 @@ fn drop_hand(mut commands: Commands, hand: Query<Entity, With<AimHand>>) {
 /// The ray from the hand onto the panel, written to the pointer and to [`Laser`].
 fn aim_laser(
     hand: Query<(&Transform, &OxrSpaceLocationFlags), With<AimHand>>,
+    root: Query<&GlobalTransform, With<XrTrackingRoot>>,
     screen: Query<(), With<PanelScreen>>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut aimed: ResMut<Aimed>,
@@ -187,9 +229,15 @@ fn aim_laser(
             hit
         })
     });
+    let tracked_now = tracked.is_some();
+    // A tracked laser has the pointer, on the panel or not. Without a root the world ray is
+    // unknown, and the picks fall back to the camera's ray through the cursor.
+    let ray = tracked.and_then(|(pose, _)| ray_in_world(&root.single().ok()?.affine(), pose));
     let now = Aimed {
-        tracked: tracked.is_some(),
+        tracked: tracked_now,
         hit,
+        world: aimed.world,
+        ray,
     };
     if *aimed != now {
         *aimed = now;
@@ -198,9 +246,12 @@ fn aim_laser(
     if laser.on_panel != on_panel {
         laser.on_panel = on_panel;
     }
-    let aim = hit.map(|h| Aim {
-        cursor: Some(h.cursor),
-        ray: None,
+    if laser.tracked != tracked_now {
+        laser.tracked = tracked_now;
+    }
+    let aim = tracked_now.then_some(Aim {
+        cursor: hit.map(|h| h.cursor),
+        ray,
     });
     if *sent != aim {
         pointer::set_vr(aim);
@@ -208,21 +259,74 @@ fn aim_laser(
     }
 }
 
-/// The beam runs from the hand to the hit, or a stub where it hits nothing, and hides with the
-/// controller.
+/// What the ray meets in the world, off the panel, as the target code last saw it.
+fn aim_world(mut aimed: ResMut<Aimed>) {
+    let world = if aimed.tracked && aimed.hit.is_none() {
+        pointer::hit()
+    } else {
+        None
+    };
+    if aimed.world != world {
+        aimed.world = world;
+    }
+}
+
+/// The beam runs from the hand to the hit (the panel's, else the world's) or a stub where it hits
+/// nothing, and hides with the controller.
 fn shape_beam(aimed: Res<Aimed>, mut beam: Query<(&mut Transform, &mut Visibility), With<Beam>>) {
     let length = aimed.length();
+    let want = if aimed.tracked {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
     for (mut transform, mut visibility) in &mut beam {
         // A unit-long beam along -Z, scaled to `length` and moved so it starts at the hand.
         transform.scale = Vec3::new(1.0, 1.0, length);
         transform.translation = Vec3::new(0.0, 0.0, -length / 2.0);
-        let want = if aimed.tracked {
+        if *visibility != want {
+            *visibility = want;
+        }
+    }
+}
+
+/// The marker sits at a world hit, bright on a unit or object the player can act on.
+fn shape_marker(
+    aimed: Res<Aimed>,
+    mut marker: Query<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &MeshMaterial3d<StandardMaterial>,
+        ),
+        With<Marker>,
+    >,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (mut transform, mut visibility, material) in &mut marker {
+        let show = aimed.tracked && aimed.hit.is_none() && aimed.world.is_some();
+        let want = if show {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
         if *visibility != want {
             *visibility = want;
+        }
+        if let Some(world) = aimed.world.filter(|_| show) {
+            let at = world.distance;
+            transform.translation = Vec3::new(0.0, 0.0, -at);
+            transform.scale = Vec3::splat(MARKER_SIZE * at.max(1.0));
+            let color = if world.guid.is_some() {
+                Color::srgb(0.4, 1.0, 0.5)
+            } else {
+                Color::srgb(1.0, 0.85, 0.35)
+            };
+            if let Some(m) = materials.get_mut(&material.0) {
+                if m.base_color != color {
+                    m.base_color = color;
+                }
+            }
         }
     }
 }
@@ -361,6 +465,14 @@ mod tests {
             PrimaryWindow,
         ));
         app.world_mut().spawn(PanelScreen);
+        // The tracking root: moved and turned a quarter, so the world ray is not the hand's own.
+        app.world_mut().spawn((
+            XrTrackingRoot,
+            GlobalTransform::from(
+                Transform::from_xyz(10.0, 0.0, 0.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+            ),
+        ));
         let hand = app
             .world_mut()
             .spawn((
@@ -388,6 +500,16 @@ mod tests {
             Some(hit.cursor),
             "the laser is the UI's cursor"
         );
+        // The world ray is the hand's, carried by the root: it starts at the root's place and
+        // points where the root's quarter turn sends the hand's -Z.
+        let ray = aimed.ray.expect("the root's transform is known");
+        assert!((ray.origin - Vec3::new(10.0, 0.0, 0.0)).length() < 1e-5);
+        assert!(
+            (*ray.direction - Vec3::NEG_X).length() < 1e-5,
+            "{}",
+            ray.direction
+        );
+        assert!(pointer::laser_aims() && app.world().resource::<Laser>().tracked);
 
         // Turned away: no hit, the laser is off and the pointer is the window's again.
         app.world_mut().get_mut::<Transform>(hand).unwrap().rotation =
@@ -396,7 +518,13 @@ mod tests {
         assert_eq!(app.world().resource::<Aimed>().hit, None);
         assert!(app.world().resource::<Aimed>().tracked);
         assert!(!app.world().resource::<Laser>().on_panel);
-        assert_eq!(pointer::ui_cursor(&Window::default()), None);
+        assert_eq!(
+            pointer::ui_cursor(&Window::default()),
+            None,
+            "off the panel the laser has no UI cursor, and the OS mouse is not read"
+        );
+        assert!(pointer::laser_aims(), "it still aims the world");
+        assert!(app.world().resource::<Laser>().tracked);
 
         // A controller the runtime lost is not pointing, whatever pose it kept.
         app.world_mut().get_mut::<Transform>(hand).unwrap().rotation = Quat::IDENTITY;
@@ -406,16 +534,67 @@ mod tests {
         app.update();
         assert_eq!(*app.world().resource::<Aimed>(), Aimed::default());
         assert!(!app.world().resource::<Laser>().on_panel);
+        assert!(!app.world().resource::<Laser>().tracked);
+        assert!(!pointer::laser_aims(), "the picks fall back to the mouse");
         assert_eq!(pointer::ui_cursor(&Window::default()), None);
+
+        // A tracked hand with no root to carry it has no world ray: the picks fall back too.
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<XrTrackingRoot>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().despawn(root);
+        app.world_mut()
+            .entity_mut(hand)
+            .insert(OxrSpaceLocationFlags(
+                openxr::SpaceLocationFlags::POSITION_VALID
+                    | openxr::SpaceLocationFlags::ORIENTATION_VALID,
+            ));
+        app.update();
+        assert!(app.world().resource::<Aimed>().tracked);
+        assert_eq!(app.world().resource::<Aimed>().ray, None);
+        assert!(!pointer::laser_aims());
+    }
+
+    #[test]
+    fn the_world_ray_is_the_hands_through_the_roots_transform() {
+        let root = Transform::from_xyz(1.0, 2.0, 3.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+            .compute_affine();
+        let hand = Transform::from_xyz(0.2, 0.0, -0.5);
+        let ray = ray_in_world(&root, &hand).unwrap();
+        // The hand is half a metre in front of the root's origin, which faces -X now.
+        assert!(
+            (ray.origin - Vec3::new(0.5, 2.0, 2.8)).length() < 1e-5,
+            "{}",
+            ray.origin
+        );
+        assert!((*ray.direction - Vec3::NEG_X).length() < 1e-5);
     }
 
     #[test]
     fn the_beam_runs_to_the_hit_and_hides_with_the_controller() {
         let mut app = App::new();
-        app.init_resource::<Aimed>().add_systems(Update, shape_beam);
+        app.init_resource::<Aimed>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Update, (shape_beam, shape_marker));
         let beam = app
             .world_mut()
             .spawn((Beam, Transform::default(), Visibility::Hidden))
+            .id();
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let marker = app
+            .world_mut()
+            .spawn((
+                Marker,
+                Transform::default(),
+                Visibility::Hidden,
+                MeshMaterial3d(material.clone()),
+            ))
             .id();
         app.update();
         assert_eq!(
@@ -433,6 +612,7 @@ mod tests {
                 local: Vec2::ZERO,
                 distance: 1.5,
             }),
+            ..default()
         };
         app.update();
         let t = app.world().get::<Transform>(beam).unwrap();
@@ -441,5 +621,102 @@ mod tests {
             *app.world().get::<Visibility>(beam).unwrap(),
             Visibility::Inherited
         );
+        assert_eq!(
+            *app.world().get::<Visibility>(marker).unwrap(),
+            Visibility::Hidden,
+            "the panel's hit is the UI cursor's marker, not this one"
+        );
+
+        // Off the panel, on a unit 12 units off: the beam and the marker end there, bright.
+        *app.world_mut().resource_mut::<Aimed>() = Aimed {
+            tracked: true,
+            world: Some(pointer::Hit {
+                distance: 12.0,
+                guid: Some(0x31),
+            }),
+            ..default()
+        };
+        app.update();
+        let t = app.world().get::<Transform>(beam).unwrap();
+        assert_eq!((t.scale.z, t.translation.z), (12.0, -6.0));
+        let m = app.world().get::<Transform>(marker).unwrap();
+        assert_eq!(m.translation.z, -12.0);
+        assert!(
+            (m.scale.x - MARKER_SIZE * 12.0).abs() < 1e-6,
+            "constant angular size"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(marker).unwrap(),
+            Visibility::Inherited
+        );
+        let green = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&material)
+            .unwrap()
+            .base_color;
+
+        // A far hit on bare ground: the beam stops at its reach, the marker does not, and it is
+        // not the colour of a hover.
+        *app.world_mut().resource_mut::<Aimed>() = Aimed {
+            tracked: true,
+            world: Some(pointer::Hit {
+                distance: 90.0,
+                guid: None,
+            }),
+            ..default()
+        };
+        app.update();
+        assert_eq!(app.world().get::<Transform>(beam).unwrap().scale.z, REACH);
+        assert_eq!(
+            app.world().get::<Transform>(marker).unwrap().translation.z,
+            -90.0
+        );
+        let ground = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&material)
+            .unwrap()
+            .base_color;
+        assert_ne!(green, ground);
+
+        // The controller goes: both hide.
+        *app.world_mut().resource_mut::<Aimed>() = Aimed::default();
+        app.update();
+        for e in [beam, marker] {
+            assert_eq!(
+                *app.world().get::<Visibility>(e).unwrap(),
+                Visibility::Hidden
+            );
+        }
+    }
+
+    #[test]
+    fn the_world_hit_is_read_only_off_the_panel() {
+        let mut app = App::new();
+        app.init_resource::<Aimed>().add_systems(Update, aim_world);
+        pointer::set_hit(Some(pointer::Hit {
+            distance: 5.0,
+            guid: None,
+        }));
+        let panel = PanelHit {
+            cursor: Vec2::ZERO,
+            local: Vec2::ZERO,
+            distance: 1.5,
+        };
+        for (tracked, hit, seen) in [
+            (true, None, true),
+            (true, Some(panel), false),
+            (false, None, false),
+        ] {
+            *app.world_mut().resource_mut::<Aimed>() = Aimed {
+                tracked,
+                hit,
+                ..default()
+            };
+            app.update();
+            assert_eq!(app.world().resource::<Aimed>().world.is_some(), seen);
+        }
+        pointer::set_hit(None);
     }
 }

@@ -12,6 +12,11 @@
 //!    press, through [`SelectCommit`], the commit TAB uses.
 //! 3. Casts act on the hard target. A soft target is never locked by a cast.
 //! 4. Interact ([`SoftTargetInput::Interact`]) is the existing [`Interact`] message.
+//!
+//! A laser (VR) hovers for real, so the soft target does not publish under it, and its two
+//! presses act on that hover: [`SoftTargetInput::LockHovered`] is the lock of rule 2 on the unit
+//! under the laser and [`SoftTargetInput::InteractHovered`] is rule 4 on what a right click there
+//! would act on. Hover itself sends nothing.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -23,7 +28,10 @@ use benilla_world::view::WorldCamera;
 
 use super::cursor_mode::{go_highlightable, GoOverrides};
 use super::relations::{can_assist, can_attack, can_interact, Assist};
-use super::{CreatureTypes, Factions, Hovered, HoveredObject, Interact, SelectCommit};
+use super::{
+    go_is_nearest, CreatureTypes, Factions, Hovered, HoveredObject, Interact, PickOcclusion,
+    SelectCommit,
+};
 use crate::names::NameCache;
 use crate::net::{Guid, GuidIndex, NetEntity, ObjectStore, Reputations, SelfPlayer};
 use crate::player::CameraControl;
@@ -70,6 +78,10 @@ pub enum SoftTargetInput {
     Cycle(SoftSide),
     /// Interact with the soft target, as a right click on it would.
     Interact,
+    /// Lock the unit under the laser: one press, at most one packet, none for an empty hover.
+    LockHovered,
+    /// Interact with what a right click under the laser would act on.
+    InteractHovered,
 }
 
 /// Whether the soft target has an NPC to talk to, a corpse to loot or an object to use in front,
@@ -437,7 +449,12 @@ fn update_soft(
 
 /// The soft target as the mouseover, which the highlight, the tooltip and `"mouseover"` read. It
 /// runs only in mouselook, where the reference's own hover is blank.
+///
+/// It also tells a laser's crate what the laser meets this frame, which is this pass's one other
+/// job: it has the picks in hand, and a pass of its own would be one more system unordered against
+/// the colliders' exclusive `finish_colliders`.
 fn publish_soft(
+    occlusion: Res<PickOcclusion>,
     state: Res<SoftState>,
     rig: Option<Res<CameraControl>>,
     me: Query<&GlobalTransform, With<SelfPlayer>>,
@@ -445,9 +462,14 @@ fn publish_soft(
     mut hovered: ResMut<Hovered>,
     mut object: ResMut<HoveredObject>,
 ) {
+    let aims = crate::pointer::laser_aims();
+    crate::pointer::set_hit(laser_hit(aims, &hovered, &object, &occlusion));
     let Some(soft) = state.current else {
         return;
     };
+    if aims {
+        return;
+    }
     let distance = match (me.single(), at.get(soft.entity)) {
         (Ok(me), Ok(at)) => me.translation().distance(at.translation()),
         _ => 0.0,
@@ -489,12 +511,45 @@ fn publish(
     }
 }
 
+/// The nearer of what a right click would act on and the terrain or wall on the ray.
+fn laser_hit(
+    aims: bool,
+    hovered: &Hovered,
+    object: &HoveredObject,
+    occlusion: &PickOcclusion,
+) -> Option<crate::pointer::Hit> {
+    if !aims {
+        return None;
+    }
+    let pick = laser_pick(hovered, object);
+    let distance = pick.map_or(f32::INFINITY, |p| p.2).min(occlusion.distance);
+    distance.is_finite().then(|| crate::pointer::Hit {
+        distance,
+        guid: pick.map(|p| p.1),
+    })
+}
+
+/// What a right click under the pointer acts on: the nearer of the character pick (a unit or a
+/// corpse) and the GameObject, with its guid and ray distance.
+fn laser_pick(hovered: &Hovered, object: &HoveredObject) -> Option<(Entity, u64, f32)> {
+    if go_is_nearest(hovered, object) {
+        return Some((object.target?, object.guid?, object.distance));
+    }
+    let (entity, guid) = hovered
+        .target
+        .zip(hovered.guid)
+        .or(hovered.corpse.zip(hovered.corpse_guid))?;
+    Some((entity, guid, hovered.distance))
+}
+
 /// The pad's presses: a lock goes out through the commit TAB uses, an interact as the message.
 fn apply_soft_input(
     mut input: MessageReader<SoftTargetInput>,
     mut state: ResMut<SoftState>,
     mut commit: SelectCommit,
     mut interact: MessageWriter<Interact>,
+    hovered: Res<Hovered>,
+    object: Res<HoveredObject>,
 ) {
     for msg in input.read() {
         match msg {
@@ -517,6 +572,25 @@ fn apply_soft_input(
                     info!("pad: interact {:?} -> {:#x}", pick.kind, pick.guid);
                 }
                 interact.write(Interact(pick.entity));
+            }
+            SoftTargetInput::LockHovered => {
+                // A unit only: a corpse or a GameObject is not a selection.
+                let Some((entity, guid)) = hovered.target.zip(hovered.guid) else {
+                    continue;
+                };
+                if trace_on() {
+                    info!("pad: lock hovered -> {guid:#x}");
+                }
+                commit.commit(entity, guid);
+            }
+            SoftTargetInput::InteractHovered => {
+                let Some((entity, guid, _)) = laser_pick(&hovered, &object) else {
+                    continue;
+                };
+                if trace_on() {
+                    info!("pad: interact hovered -> {guid:#x}");
+                }
+                interact.write(Interact(entity));
             }
         }
     }
