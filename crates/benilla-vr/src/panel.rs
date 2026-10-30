@@ -785,6 +785,7 @@ mod tests {
                 local: Vec2::ZERO,
                 distance: 1.5,
             }),
+            ..default()
         };
         app.world_mut().run_system_once(place_marker).unwrap();
 

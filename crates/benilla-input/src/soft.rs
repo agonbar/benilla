@@ -81,6 +81,45 @@ pub fn ask_action(ask: Ask, ready: bool) -> Option<SoftTargetInput> {
     }
 }
 
+/// A trigger tapped while a laser is tracked: pressed and let go with no other button pressed in
+/// between. The right trigger then locks what the laser hovers and the left one interacts with it
+/// ([`SoftTargetInput::LockHovered`], [`SoftTargetInput::InteractHovered`]). Held, a trigger is a
+/// layer ([`crate::layers`]), so acting on the press would retarget on every bar press; the
+/// release decides. The sticks' direction edges are movement, not a button.
+#[derive(Default, Debug)]
+pub struct Tap(Option<&'static str>);
+
+impl Tap {
+    fn input(token: &str) -> Option<SoftTargetInput> {
+        match token {
+            "PADRTRIGGER" => Some(SoftTargetInput::LockHovered),
+            "PADLTRIGGER" => Some(SoftTargetInput::InteractHovered),
+            _ => None,
+        }
+    }
+
+    /// `token` went down.
+    pub fn down(&mut self, token: &'static str) {
+        if Self::input(token).is_some() {
+            // The second trigger is the both-triggers layer.
+            self.0 = self.0.is_none().then_some(token);
+        } else if !crate::tokens::LEFT_STICK.contains(&token)
+            && !crate::tokens::RIGHT_STICK.contains(&token)
+        {
+            self.0 = None;
+        }
+    }
+
+    /// `token` went up: what the tap does, if it was one.
+    pub fn up(&mut self, token: &str) -> Option<SoftTargetInput> {
+        if self.0 == Some(token) {
+            self.0 = None;
+            return Self::input(token);
+        }
+        None
+    }
+}
+
 /// What `token` going down does, with the layer it carries and everything held at that moment.
 pub fn press(token: &str, mods: Modifiers, down: &BTreeSet<&'static str>) -> Option<Press> {
     let plain = mods == Modifiers::default();
@@ -101,6 +140,35 @@ pub fn press(token: &str, mods: Modifiers, down: &BTreeSet<&'static str>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_trigger_tapped_acts_and_a_trigger_held_for_a_layer_does_not() {
+        let mut tap = Tap::default();
+        tap.down("PADRTRIGGER");
+        assert_eq!(tap.up("PADRTRIGGER"), Some(SoftTargetInput::LockHovered));
+        tap.down("PADLTRIGGER");
+        assert_eq!(
+            tap.up("PADLTRIGGER"),
+            Some(SoftTargetInput::InteractHovered)
+        );
+        // Walking with the stick while it is held does not spoil the tap.
+        tap.down("PADRTRIGGER");
+        tap.down("PADLSTICKUP");
+        tap.down("PADRSTICKLEFT");
+        assert_eq!(tap.up("PADRTRIGGER"), Some(SoftTargetInput::LockHovered));
+        // A bar press under the trigger is the layer's.
+        tap.down("PADRTRIGGER");
+        tap.down("PAD1");
+        assert_eq!(tap.up("PADRTRIGGER"), None);
+        // Both triggers are the both-triggers layer.
+        tap.down("PADRTRIGGER");
+        tap.down("PADLTRIGGER");
+        assert_eq!(tap.up("PADLTRIGGER"), None);
+        assert_eq!(tap.up("PADRTRIGGER"), None);
+        // A release with no press is nothing.
+        assert_eq!(tap.up("PADRTRIGGER"), None);
+        assert_eq!(tap.up("PAD1"), None);
+    }
 
     const NONE: Modifiers = Modifiers {
         alt: false,

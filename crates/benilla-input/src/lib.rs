@@ -84,12 +84,21 @@ pub struct PadRouted {
     pub what: String,
 }
 
-/// A laser pointer on the UI panel, set by a crate that has one (VR). While `on_panel`, the
-/// pad is in cursor mode, the right trigger clicks, and the right stick scrolls instead of moving
-/// the pad's cursor ([`actions::scroll`]).
+/// A laser pointer, set by a crate that has one (VR). While it is `tracked` the right trigger
+/// clicks in cursor mode, and in gameplay mode a tap of either trigger acts on what the laser
+/// hovers ([`soft::Tap`]). While `on_panel`, the pad is in cursor mode and the right stick scrolls
+/// instead of moving the pad's cursor ([`actions::scroll`]).
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Laser {
     pub on_panel: bool,
+    pub tracked: bool,
+}
+
+impl Laser {
+    /// The laser has the pointer: it clicks, wherever it points.
+    fn pointing(&self) -> bool {
+        self.on_panel || self.tracked
+    }
 }
 
 /// The client with a gamepad: [`benilla_app::run_with_group`] with gilrs on and [`PadPlugin`] added.
@@ -182,6 +191,8 @@ struct Runtime {
     /// Inputs the pad wrote last frame, which its readers must not take for the player's.
     own: Own,
     back: hold::BackHold,
+    /// A trigger pressed under the laser that may still be a tap.
+    tap: soft::Tap,
     /// `PADBACK` was held long: the keyboard is to be shown or hidden.
     toggle_keyboard: bool,
     left_was: bool,
@@ -439,6 +450,20 @@ fn route_keys(
     let (up, down) = edges(&rt.prev_down, state.down());
     let mods = layers::modifiers(&cfg, &state);
     for token in up {
+        let tapped = rt.tap.up(token).filter(|_| laser.tracked);
+        if let Some(input) = tapped {
+            soft_out.write(input);
+            if trace.0 {
+                info!("pad: {token} tap -> {input:?}");
+            }
+            if routed_on.0 {
+                routed_out.write(PadRouted {
+                    token,
+                    pressed: false,
+                    what: format!("{input:?}"),
+                });
+            }
+        }
         let routed = rt.routed.remove(token);
         let command = match routed {
             Some(Routed::Binding) => {
@@ -472,8 +497,11 @@ fn route_keys(
         }
     }
     for token in down {
-        if cursor_mode && actions::consumed(token, left_is_cursor, laser.on_panel) {
-            let act = actions::press(token, laser.on_panel);
+        if !cursor_mode && laser.tracked {
+            rt.tap.down(token);
+        }
+        if cursor_mode && actions::consumed(token, left_is_cursor, laser.pointing()) {
+            let act = actions::press(token, laser.pointing());
             rt.acts.extend(act);
             rt.routed.insert(token, Routed::Cursor(act));
             if trace.0 {
@@ -637,7 +665,7 @@ fn drive_cursor(
                     }
                 }
                 // A click at the laser is not the pad taking the cursor.
-                Act::Button { down: true, .. } if !pointing => input.pad_action = true,
+                Act::Button { down: true, .. } if !laser.pointing() => input.pad_action = true,
                 _ => {}
             }
         }
@@ -1167,6 +1195,60 @@ mod tests {
             app.world().resource::<Runtime>().cursor.owner,
             cursor::Owner::Pad
         );
+
+        // A tracked laser off the panel with the ground spell still armed: the right trigger is a
+        // left click, which the world reads as the commit on the laser's hit, and no tap.
+        app.world_mut().resource_mut::<Laser>().tracked = true;
+        app.world_mut().resource_mut::<PadState>().right = Vec2::ZERO;
+        hold(&mut app, &["PADRTRIGGER"]);
+        app.update();
+        assert_eq!(clicks(&app), [(MouseButton::Left, ButtonState::Pressed)]);
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(clicks(&app), [(MouseButton::Left, ButtonState::Released)]);
+        assert!(soft_inputs(&app).is_empty(), "no tap in cursor mode");
+    }
+
+    /// A tracked laser in gameplay mode: a trigger tapped locks or interacts with what the laser
+    /// hovers, and a trigger held for a layer does not.
+    #[test]
+    fn a_trigger_tapped_under_a_laser_acts_on_the_hover_and_a_layer_does_not() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Laser>().tracked = true;
+        hold(&mut app, &["PADRTRIGGER"]);
+        app.update();
+        assert!(
+            soft_inputs(&app).is_empty(),
+            "the press waits for the release"
+        );
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(soft_inputs(&app), [SoftTargetInput::LockHovered]);
+
+        hold(&mut app, &["PADLTRIGGER"]);
+        app.update();
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(soft_inputs(&app), [SoftTargetInput::InteractHovered]);
+
+        // The layer: a bar press under the trigger, then the trigger lets go.
+        hold(&mut app, &["PADRTRIGGER"]);
+        app.update();
+        hold(&mut app, &["PADRTRIGGER", "PAD1"]);
+        app.update();
+        hold(&mut app, &["PAD1"]);
+        app.update();
+        hold(&mut app, &[]);
+        app.update();
+        assert!(soft_inputs(&app).is_empty());
+
+        // No laser, no tap: the Deck's triggers are layers alone.
+        app.world_mut().resource_mut::<Laser>().tracked = false;
+        hold(&mut app, &["PADRTRIGGER"]);
+        app.update();
+        hold(&mut app, &[]);
+        app.update();
+        assert!(soft_inputs(&app).is_empty());
     }
 
     #[test]

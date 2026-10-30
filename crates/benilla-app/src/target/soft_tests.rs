@@ -520,3 +520,172 @@ fn cand_for(entity: Entity, guid: u64, kind: Kind) -> Cand {
         score: 0.1,
     }
 }
+
+/// The laser's hover is what a right click would act on, and only while it aims.
+#[test]
+fn the_laser_hover_is_the_nearer_of_the_unit_and_the_object() {
+    let (mob, chest) = (
+        Entity::from_raw_u32(1).unwrap(),
+        Entity::from_raw_u32(2).unwrap(),
+    );
+    let unit = Hovered {
+        target: Some(mob),
+        guid: Some(MOB),
+        distance: 8.0,
+        ..Hovered::default()
+    };
+    let object = |distance| HoveredObject {
+        target: Some(chest),
+        guid: Some(0x77),
+        distance,
+    };
+    let sky = PickOcclusion::default();
+    let wall = |distance| PickOcclusion {
+        distance,
+        ..PickOcclusion::default()
+    };
+    assert_eq!(
+        laser_hit(false, &unit, &HoveredObject::default(), &sky),
+        None
+    );
+    assert_eq!(
+        laser_hit(true, &unit, &HoveredObject::default(), &sky),
+        Some(crate::pointer::Hit {
+            distance: 8.0,
+            guid: Some(MOB)
+        })
+    );
+    // Ground with nothing hovered is a hit with no one in it; sky is none; a wall in front wins.
+    assert_eq!(
+        laser_hit(
+            true,
+            &Hovered::default(),
+            &HoveredObject::default(),
+            &wall(30.0)
+        ),
+        Some(crate::pointer::Hit {
+            distance: 30.0,
+            guid: None
+        })
+    );
+    assert_eq!(
+        laser_hit(true, &Hovered::default(), &HoveredObject::default(), &sky),
+        None
+    );
+    assert_eq!(
+        laser_hit(true, &unit, &HoveredObject::default(), &wall(2.0)).map(|h| h.distance),
+        Some(2.0)
+    );
+    assert_eq!(laser_pick(&unit, &object(5.0)).map(|p| p.1), Some(0x77));
+    assert_eq!(laser_pick(&unit, &object(12.0)).map(|p| p.1), Some(MOB));
+    let corpse = Hovered {
+        corpse: Some(mob),
+        corpse_guid: Some(MOB),
+        distance: 3.0,
+        ..Hovered::default()
+    };
+    assert_eq!(
+        laser_pick(&corpse, &HoveredObject::default()).map(|p| p.1),
+        Some(MOB)
+    );
+    assert_eq!(
+        laser_pick(&Hovered::default(), &HoveredObject::default()),
+        None
+    );
+}
+
+/// The wire rule under a laser: a run of hover changes sends no `CMSG_SET_SELECTION`, one trigger
+/// lock sends exactly one, and a lock with nothing, a corpse or an object under it sends none.
+#[test]
+fn laser_hover_changes_send_nothing_and_one_lock_sends_one() {
+    let mut f = fix();
+    let (mob, other) = (f.mob, f.other);
+    let hover = |f: &mut Fix, entity: Option<(Entity, u64)>| {
+        *f.app.world_mut().resource_mut::<Hovered>() = Hovered {
+            target: entity.map(|e| e.0),
+            guid: entity.map(|e| e.1),
+            distance: 5.0,
+            ..Hovered::default()
+        };
+        f.app.world_mut().run_system_once(publish_soft).unwrap();
+    };
+    // Sweep the laser across both mobs and off them again.
+    for at in [
+        Some((mob, MOB)),
+        Some((other, OTHER)),
+        None,
+        Some((mob, MOB)),
+        None,
+    ] {
+        hover(&mut f, at);
+    }
+    assert!(f.selections().is_empty(), "hover is silent on the wire");
+    assert_eq!(f.app.world().resource::<Selection>().guid, None);
+
+    // A lock on nothing sends nothing.
+    f.send(SoftTargetInput::LockHovered);
+    f.app.world_mut().run_system_once(apply_soft_input).unwrap();
+    assert!(f.selections().is_empty());
+
+    // A corpse and an object are not a selection.
+    *f.app.world_mut().resource_mut::<Hovered>() = Hovered {
+        corpse: Some(mob),
+        corpse_guid: Some(MOB),
+        distance: 3.0,
+        ..Hovered::default()
+    };
+    *f.app.world_mut().resource_mut::<HoveredObject>() = HoveredObject {
+        target: Some(other),
+        guid: Some(0x77),
+        distance: 2.0,
+    };
+    f.send(SoftTargetInput::LockHovered);
+    f.app.world_mut().run_system_once(apply_soft_input).unwrap();
+    assert!(f.selections().is_empty());
+    *f.app.world_mut().resource_mut::<HoveredObject>() = HoveredObject::default();
+
+    // One trigger, one packet.
+    hover(&mut f, Some((mob, MOB)));
+    f.send(SoftTargetInput::LockHovered);
+    f.app.world_mut().run_system_once(apply_soft_input).unwrap();
+    assert_eq!(f.selections(), [MOB]);
+    assert_eq!(f.app.world().resource::<Selection>().guid, Some(MOB));
+
+    // The laser leaves: the hard target and the wire stay as they were.
+    hover(&mut f, None);
+    assert!(f.selections().is_empty(), "leaving a hover sends no guid 0");
+    assert_eq!(f.app.world().resource::<Selection>().guid, Some(MOB));
+}
+
+/// The left trigger is a right click under the laser: the `Interact` message, no selection.
+#[test]
+fn an_interact_under_the_laser_is_the_interact_message_and_sends_no_selection() {
+    let mut f = fix();
+    *f.app.world_mut().resource_mut::<Hovered>() = Hovered {
+        corpse: Some(f.mob),
+        corpse_guid: Some(MOB),
+        distance: 3.0,
+        ..Hovered::default()
+    };
+    f.send(SoftTargetInput::InteractHovered);
+    f.app.world_mut().run_system_once(apply_soft_input).unwrap();
+    let sent: Vec<_> = f
+        .app
+        .world_mut()
+        .resource_mut::<Messages<Interact>>()
+        .drain()
+        .collect();
+    assert_eq!(sent, [Interact(f.mob)]);
+    assert!(f.selections().is_empty());
+    // Nothing under it, nothing to act on.
+    *f.app.world_mut().resource_mut::<Hovered>() = Hovered::default();
+    f.send(SoftTargetInput::InteractHovered);
+    f.app.world_mut().run_system_once(apply_soft_input).unwrap();
+    assert!(f
+        .app
+        .world_mut()
+        .resource_mut::<Messages<Interact>>()
+        .drain()
+        .next()
+        .is_none());
+}

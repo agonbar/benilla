@@ -6,8 +6,12 @@
 //! two active sets, and both would bind the same sticks and triggers. What each input means is
 //! `benilla-input`'s mode machine's to say, and it says it the same way for a Deck.
 //!
+//! The set also holds one output, the right controller's haptic, pulsed once when the laser's hover
+//! moves onto a new unit or object ([`HoverPulse`]).
+//!
 //! `WOW_VR_INPUT_TRACE=1` prints one line per pad token that changed: the Touch input behind it,
-//! the command it resolved to (or the cursor act that took it), the mode and the panel hit.
+//! the command it resolved to (or the cursor act that took it), the mode and the panel hit, and
+//! one line per hover pulse.
 
 use bevy::input::gamepad::RawGamepadEvent;
 use bevy::prelude::*;
@@ -20,12 +24,17 @@ use bevy_mod_openxr::session::OxrSession;
 use bevy_mod_xr::session::{session_available, XrSessionCreated};
 use bevy_mod_xr::spaces::{XrSpace, XrSpaceSyncSet};
 
+use benilla_app::pointer;
 use benilla_input::{Mode, PadMode, PadRouted, PadSystems, RoutedTrace};
 
 use crate::laser::Aimed;
 use crate::touch::{self, Changes, Touch};
 
 const PROFILE: &str = "/interaction_profiles/oculus/touch_controller";
+
+/// The hover pulse: a tick, not a buzz, so sweeping across a crowd reads as a run of ticks.
+const PULSE_NANOS: i64 = 20_000_000;
+const PULSE_AMPLITUDE: f32 = 0.4;
 
 /// The set and its actions. Paired inputs are one action with a subaction path per hand.
 #[derive(Resource)]
@@ -41,6 +50,7 @@ pub(crate) struct Actions {
     b: openxr::Action<bool>,
     menu: openxr::Action<bool>,
     aim: openxr::Action<openxr::Posef>,
+    haptic: openxr::Action<openxr::Haptic>,
     left: openxr::Path,
     right: openxr::Path,
 }
@@ -64,6 +74,7 @@ impl Actions {
             b: set.create_action("b_click", "B", &[])?,
             menu: set.create_action("menu_click", "Menu", &[])?,
             aim: set.create_action("aim_pose", "Aim pose", &both)?,
+            haptic: set.create_action("haptic", "Haptic", &both)?,
             set,
             left,
             right,
@@ -78,6 +89,17 @@ impl Actions {
                 warn!("vr: the aim space: {e}");
                 None
             }
+        }
+    }
+
+    /// One short buzz in the right controller.
+    fn pulse(&self, session: &OxrSession) {
+        let buzz = openxr::HapticVibration::new()
+            .duration(openxr::Duration::from_nanos(PULSE_NANOS))
+            .frequency(openxr::FREQUENCY_UNSPECIFIED)
+            .amplitude(PULSE_AMPLITUDE);
+        if let Err(e) = self.haptic.apply_feedback(session, self.right, &buzz) {
+            warn!("vr: the haptic pulse: {e}");
         }
     }
 
@@ -143,6 +165,10 @@ impl Plugin for HandsPlugin {
             .add_systems(XrSessionCreated, attach_set.run_if(ready))
             .add_systems(OxrSendActionBindings, suggest_bindings.run_if(ready))
             .add_systems(
+                Update,
+                pulse_on_hover.run_if(openxr_session_running).run_if(ready),
+            )
+            .add_systems(
                 PreUpdate,
                 (
                     sync_actions
@@ -197,6 +223,7 @@ fn suggest_bindings(actions: Res<Actions>, mut out: MessageWriter<OxrSuggestActi
     both(actions.stick.as_raw(), "thumbstick");
     both(actions.stick_click.as_raw(), "thumbstick/click");
     both(actions.aim.as_raw(), "aim/pose");
+    bind(actions.haptic.as_raw(), &["/user/hand/right/output/haptic"]);
     bind(actions.x.as_raw(), &["/user/hand/left/input/x/click"]);
     bind(actions.y.as_raw(), &["/user/hand/left/input/y/click"]);
     bind(actions.menu.as_raw(), &["/user/hand/left/input/menu/click"]);
@@ -246,6 +273,44 @@ fn read_touch(
     }
 }
 
+/// Which hover the laser last buzzed for: a pulse when it moves onto a unit or object that is not
+/// the one it was on, none for leaving one, and none when it comes back to the same one at once.
+#[derive(Default, Debug)]
+pub struct HoverPulse(Option<u64>);
+
+impl HoverPulse {
+    /// The guid to pulse for, given what the laser meets this frame.
+    pub fn step(&mut self, hit: Option<pointer::Hit>) -> Option<u64> {
+        let now = hit.and_then(|h| h.guid);
+        if now == self.0 {
+            return None;
+        }
+        self.0 = now;
+        now
+    }
+}
+
+fn pulse_on_hover(
+    actions: Res<Actions>,
+    session: Res<OxrSession>,
+    traced: Option<Res<RoutedTrace>>,
+    mut pulse: Local<HoverPulse>,
+) {
+    let hit = pointer::hit();
+    let Some(guid) = pulse.step(hit) else {
+        return;
+    };
+    actions.pulse(&session);
+    if traced.is_some_and(|t| t.0) {
+        info!("{}", hover_line(guid, hit.map_or(0.0, |h| h.distance)));
+    }
+}
+
+/// One `WOW_VR_INPUT_TRACE` line for a hover pulse.
+pub fn hover_line(guid: u64, distance: f32) -> String {
+    format!("vr input: laser hover {guid:#x} at {distance:.1} -> haptic")
+}
+
 /// One `WOW_VR_INPUT_TRACE` line.
 pub fn trace_line(
     source: &str,
@@ -287,6 +352,38 @@ fn trace_input(mut routed: MessageReader<PadRouted>, mode: Res<PadMode>, aimed: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn over(guid: u64) -> Option<pointer::Hit> {
+        Some(pointer::Hit {
+            distance: 10.0,
+            guid: Some(guid),
+        })
+    }
+
+    #[test]
+    fn the_haptic_pulses_once_per_new_hover_and_not_for_ground_or_air() {
+        let ground = Some(pointer::Hit {
+            distance: 30.0,
+            guid: None,
+        });
+        let mut p = HoverPulse::default();
+        assert_eq!(p.step(None), None);
+        assert_eq!(p.step(ground), None, "ground is not a hover");
+        assert_eq!(p.step(over(7)), Some(7));
+        assert_eq!(p.step(over(7)), None, "still on it");
+        assert_eq!(p.step(over(8)), Some(8), "straight onto the next");
+        assert_eq!(p.step(None), None, "leaving is silent");
+        assert_eq!(p.step(over(8)), Some(8), "coming back is a new hover");
+        assert_eq!(p.step(ground), None);
+    }
+
+    #[test]
+    fn a_hover_trace_line_names_the_guid_and_the_distance() {
+        assert_eq!(
+            hover_line(0x31, 12.34),
+            "vr input: laser hover 0x31 at 12.3 -> haptic"
+        );
+    }
 
     #[test]
     fn a_trace_line_names_the_input_the_token_the_command_the_mode_and_the_hit() {

@@ -6,6 +6,9 @@
 //! Priority: the VR laser, then the pad's cursor, then the OS mouse, then the headless hover probe.
 //! The cursor is in the window's logical pixels, y down, what `Window::cursor_position` answers.
 //! Nothing here moves the OS cursor, so a trackpad and a pad's cursor can both be live.
+//!
+//! A tracked laser owns the pointer outright: off the panel it has no UI cursor, and the other
+//! sources are not read, so a stale OS cursor cannot hover a window behind the player's back.
 
 use std::sync::RwLock;
 
@@ -13,7 +16,8 @@ use bevy::prelude::*;
 
 use crate::target::hover_probe_point;
 
-/// What a laser aims at: the cursor on a UI panel it hits, if any, and its ray into the world.
+/// What a tracked laser aims at: the cursor on a UI panel it hits, if any, and its ray into the
+/// world, in world space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aim {
     pub cursor: Option<Vec2>,
@@ -28,9 +32,18 @@ pub struct Pointer {
 }
 
 impl Pointer {
-    /// The cursor of the highest source that has one.
+    /// The cursor of the highest source that has one. A laser that is tracked has the pointer:
+    /// its cursor is the panel hit, and none off the panel.
     fn cursor(&self) -> Option<Vec2> {
-        self.vr.and_then(|a| a.cursor).or(self.pad)
+        match self.vr {
+            Some(aim) => aim.cursor,
+            None => self.pad,
+        }
+    }
+
+    /// Whether a laser's ray, not the cursor, aims the world picks.
+    fn aims(&self) -> bool {
+        self.vr.is_some_and(|a| a.ray.is_some())
     }
 }
 
@@ -59,12 +72,43 @@ pub fn set_vr(aim: Option<Aim>) {
     update(|p| p.vr = aim);
 }
 
-/// The UI's cursor: the seam's, else the window's, else the hover probe's aim.
+/// The first thing a laser meets in the world: how far along the ray, and the unit or object there
+/// if it is one the player can act on (the hover).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    pub distance: f32,
+    pub guid: Option<u64>,
+}
+
+static HIT: RwLock<Option<Hit>> = RwLock::new(None);
+
+/// The laser's world hit, or `None` when its ray meets nothing. Written by the target code each
+/// frame; a crate with a laser reads it for the beam's length and for a haptic pulse.
+pub fn set_hit(hit: Option<Hit>) {
+    *HIT.write().unwrap_or_else(|e| e.into_inner()) = hit;
+}
+
+pub fn hit() -> Option<Hit> {
+    *HIT.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a laser's ray aims the world picks. The reference's mouselook blanks the mouseover
+/// (`0x483e80`) because its cursor is hidden at the screen's middle; a laser points independently
+/// of the look, so its hover stands through one.
+pub fn laser_aims() -> bool {
+    sources().aims()
+}
+
+/// The UI's cursor: the seam's, else the window's, else the hover probe's aim. A tracked laser
+/// alone answers when it is there.
 pub fn ui_cursor(window: &Window) -> Option<Vec2> {
     resolve(&sources(), window.cursor_position(), hover_probe_point())
 }
 
 fn resolve(p: &Pointer, os: Option<Vec2>, probe: Option<Vec2>) -> Option<Vec2> {
+    if p.vr.is_some() {
+        return p.cursor();
+    }
     p.cursor().or(os).or(probe)
 }
 
@@ -74,10 +118,19 @@ pub fn physical_cursor(window: &Window) -> Option<Vec2> {
         &sources(),
         window.scale_factor(),
         window.physical_cursor_position(),
+        window.physical_size().as_vec2(),
     )
 }
 
-fn physical(p: &Pointer, scale: f32, os: Option<Vec2>) -> Option<Vec2> {
+/// A laser aiming at the world has no pixel of its own, and a press counts as a world press only
+/// inside the viewport: the window's middle stands in for it.
+fn physical(p: &Pointer, scale: f32, os: Option<Vec2>, size: Vec2) -> Option<Vec2> {
+    if p.vr.is_some() {
+        return p
+            .cursor()
+            .map(|c| c * scale)
+            .or(p.aims().then_some(size / 2.0));
+    }
     p.cursor().map(|c| c * scale).or(os)
 }
 
@@ -146,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn a_laser_off_the_panel_hands_the_cursor_down() {
+    fn a_laser_off_the_panel_keeps_the_pointer_and_has_no_cursor() {
         let off = Pointer {
             vr: Some(Aim {
                 cursor: None,
@@ -154,9 +207,33 @@ mod tests {
             }),
             pad: Some(Vec2::new(2.0, 2.0)),
         };
+        assert_eq!(resolve(&off, Some(Vec2::ONE), Some(Vec2::ONE)), None);
+        assert!(off.aims());
+        assert!(!Pointer::default().aims());
+    }
+
+    #[test]
+    fn a_laser_in_the_world_is_inside_the_viewport_and_a_panel_hit_is_where_it_hits() {
+        let size = Vec2::new(1000.0, 600.0);
+        let world = Pointer {
+            vr: Some(Aim {
+                cursor: None,
+                ..LASER
+            }),
+            pad: None,
+        };
         assert_eq!(
-            resolve(&off, Some(Vec2::ONE), None),
-            Some(Vec2::new(2.0, 2.0))
+            physical(&world, 2.0, Some(Vec2::new(9.0, 9.0)), size),
+            Some(size / 2.0),
+            "the OS cursor is not read"
+        );
+        let panel = Pointer {
+            vr: Some(LASER),
+            pad: None,
+        };
+        assert_eq!(
+            physical(&panel, 2.0, None, size),
+            Some(Vec2::new(10.0, 10.0))
         );
     }
 
@@ -188,6 +265,22 @@ mod tests {
             pick_ray(&Pointer::default(), None, through).is_none(),
             "no cursor, no ray"
         );
+        // A laser tracked with no world ray (its root unknown) over the panel falls back to the
+        // camera's ray through the panel's cursor; off the panel there is nothing to cast through.
+        let on_panel = Pointer {
+            vr: Some(Aim { ray: None, ..LASER }),
+            pad: None,
+        };
+        let ray = pick_ray(&on_panel, Some(Vec2::new(5.0, 5.0)), through).unwrap();
+        assert_eq!(ray.direction, Dir3::Z);
+        let off_panel = Pointer {
+            vr: Some(Aim {
+                cursor: None,
+                ray: None,
+            }),
+            pad: None,
+        };
+        assert!(pick_ray(&off_panel, resolve(&off_panel, None, None), through).is_none());
     }
 
     #[test]
@@ -197,8 +290,9 @@ mod tests {
             pad: Some(Vec2::new(10.0, 20.0)),
         };
         let os = Some(Vec2::new(7.0, 7.0));
-        assert_eq!(physical(&pad, 2.0, os), Some(Vec2::new(20.0, 40.0)));
-        assert_eq!(physical(&Pointer::default(), 2.0, os), os);
+        let size = Vec2::new(100.0, 100.0);
+        assert_eq!(physical(&pad, 2.0, os, size), Some(Vec2::new(20.0, 40.0)));
+        assert_eq!(physical(&Pointer::default(), 2.0, os, size), os);
     }
 
     #[test]
