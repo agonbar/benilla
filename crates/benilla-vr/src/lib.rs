@@ -11,15 +11,21 @@
 //! The Touch controllers are a pad for `benilla-input` (`hands`, `touch`), and the right one is a
 //! laser that points at the UI panel and clicks, drags and scrolls on it (`laser`).
 //!
+//! Comfort (`comfort`, `steer`, `vignette`) is first or third person, snap or smooth turn, a
+//! vignette and a recentre, all set in `vr.toml`.
+//!
 //! Without OpenXR (no loader, runtime or headset) [`run`] is the flat client.
 
+mod comfort;
 mod glare;
 mod hands;
 mod laser;
 mod panel;
 mod rig;
 mod sky_trace;
+mod steer;
 mod touch;
+mod vignette;
 
 use bevy::app::PluginGroupBuilder;
 use bevy::camera::visibility::VisibilitySystems;
@@ -35,7 +41,7 @@ use benilla_app::{AppExit, BuildId};
 use benilla_world::billboard::BillboardPlace;
 use benilla_world::ffx_glow::FfxGlow;
 use benilla_world::schedule::WorldStage;
-use benilla_world::view::{CameraPoseSet, MsaaSetting, WorldCamera, NEARCLIP_DEFAULT};
+use benilla_world::view::{CameraPoseSet, MsaaSetting, Viewer, WorldCamera, NEARCLIP_DEFAULT};
 use bevy_mod_openxr::add_xr_plugins;
 use bevy_mod_openxr::features::handtracking::HandTrackingPlugin;
 use bevy_mod_openxr::helper_traits::ToTransform;
@@ -48,7 +54,9 @@ use bevy_mod_xr::session::{XrSessionCreated, XrState, XrTrackingRoot};
 
 use openxr::ReferenceSpaceType;
 
+use comfort::Person;
 use rig::Eye;
+use steer::{Comfort, ComfortPlugin};
 
 /// The client with stereo VR: [`benilla_app::run_with_group`] with OpenXR around the default
 /// plugin group and the rig on top. Starts flat when OpenXR is unavailable.
@@ -122,6 +130,7 @@ impl Plugin for VrPlugin {
                 panel::PanelPlugin,
                 hands::HandsPlugin,
                 laser::LaserPlugin,
+                ComfortPlugin,
                 CullCameraPlugin,
             ))
             .add_systems(XrSessionCreated, spawn_eyes)
@@ -150,6 +159,8 @@ impl Plugin for CullCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Views>()
             .init_resource::<GamePose>()
+            .init_resource::<Comfort>()
+            .init_resource::<Viewer>()
             // Before the controller: the game's own pose goes back, so it never reads the head's.
             .add_systems(First, restore_game_pose)
             .add_systems(
@@ -232,7 +243,8 @@ fn read_views(openxr: Option<Res<OxrViews>>, mut views: ResMut<Views>) {
     };
 }
 
-/// Puts the root on the game camera and the head's pose and field of view on the game camera, for
+/// Puts the root where the view is (the game camera in first person, behind the avatar in third,
+/// both moved by the recentre offset) and the head's pose and field of view on the game camera, for
 /// the CPU culls (portals, draw election, drift) that look through `WorldCamera`. The game's own
 /// pose is kept for [`restore_game_pose`]. The controller reads nothing of its camera's `Transform`
 /// back but the free-fly translation, which is why the restore must be exact.
@@ -241,6 +253,8 @@ fn read_views(openxr: Option<Res<OxrViews>>, mut views: ResMut<Views>) {
 /// runtime located a frame ago, and the eyes draw with views located again for the frame itself.
 fn seat_head(
     views: Res<Views>,
+    comfort: Res<Comfort>,
+    viewer: Res<Viewer>,
     mut game: ResMut<GamePose>,
     mut root: Query<&mut Transform, (With<XrTrackingRoot>, Without<WorldCamera>)>,
     mut camera: Query<(&mut Transform, &mut Projection), With<WorldCamera>>,
@@ -257,7 +271,12 @@ fn seat_head(
     // A pose still held means the restore did not run; keep the first, which is the game's.
     let (game_pose, game_fov) = *game.0.get_or_insert((*transform, perspective.fov));
 
-    *root = rig::root_pose(&game_pose);
+    *root = match (comfort.config.person, viewer.at) {
+        (Person::Third, Some(body)) => {
+            rig::third_person_root(body, viewer.height, &game_pose, &comfort.recentre)
+        }
+        _ => rig::root_pose(&game_pose, &comfort.recentre),
+    };
     let head = rig::head_centre(&eyes);
     *transform = root.mul_transform(head);
     // The turn since the last frame stands in for the one to come.
@@ -434,6 +453,8 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(XrState::Running)
             .init_resource::<GamePose>()
+            .init_resource::<Comfort>()
+            .init_resource::<Viewer>()
             .insert_resource(Views(Some([eye(-0.03), eye(0.03)])));
         let game = Transform::from_xyz(100.0, 20.0, -50.0).with_rotation(Quat::from_euler(
             EulerRot::YXZ,
@@ -470,7 +491,7 @@ mod tests {
         app.world_mut().run_system_once(seat_head).unwrap();
 
         let root_t = *app.world().get::<Transform>(root).unwrap();
-        assert_eq!(root_t, rig::root_pose(&game));
+        assert_eq!(root_t, rig::root_pose(&game, &Transform::IDENTITY));
         let head = *app.world().get::<Transform>(camera).unwrap();
         let want = root_t.mul_transform(rig::head_centre(&[eye(-0.03), eye(0.03)]));
         assert!((head.translation - want.translation).length() < 1e-5);
@@ -479,6 +500,53 @@ mod tests {
             fov(&app, camera) > 0.7,
             "the culling camera covers both eyes"
         );
+    }
+
+    #[test]
+    fn the_recentre_offset_moves_the_root_and_so_the_head() {
+        let (mut app, camera, root, game) = world();
+        let offset = Transform::from_xyz(0.5, -0.2, 0.3).with_rotation(Quat::from_rotation_y(0.4));
+        app.world_mut().resource_mut::<Comfort>().recentre = offset;
+        app.world_mut().run_system_once(seat_head).unwrap();
+
+        let root_t = *app.world().get::<Transform>(root).unwrap();
+        assert_eq!(root_t, rig::root_pose(&game, &offset));
+        assert_ne!(root_t, rig::root_pose(&game, &Transform::IDENTITY));
+        let head = *app.world().get::<Transform>(camera).unwrap();
+        let want = root_t.mul_transform(rig::head_centre(&[eye(-0.03), eye(0.03)]));
+        assert!((head.translation - want.translation).length() < 1e-5);
+    }
+
+    #[test]
+    fn third_person_seats_the_root_behind_the_avatar_and_first_person_does_not() {
+        let (mut app, _, root, game) = world();
+        let body = Vec3::new(100.0, 0.0, -50.0);
+        app.world_mut().insert_resource(Viewer {
+            at: Some(body),
+            height: 2.0,
+            ..default()
+        });
+
+        // First person ignores the avatar: the root is the game camera's.
+        app.world_mut().run_system_once(seat_head).unwrap();
+        let first = *app.world().get::<Transform>(root).unwrap();
+        assert_eq!(first, rig::root_pose(&game, &Transform::IDENTITY));
+        app.world_mut().run_system_once(restore_game_pose).unwrap();
+
+        app.world_mut().resource_mut::<Comfort>().config.person = Person::Third;
+        app.world_mut().run_system_once(seat_head).unwrap();
+        let third = *app.world().get::<Transform>(root).unwrap();
+        assert_eq!(
+            third,
+            rig::third_person_root(body, 2.0, &game, &Transform::IDENTITY)
+        );
+        assert_ne!(third.translation, first.translation);
+        app.world_mut().run_system_once(restore_game_pose).unwrap();
+
+        // No live avatar: nothing to sit behind, so the game camera's root.
+        app.world_mut().insert_resource(Viewer::default());
+        app.world_mut().run_system_once(seat_head).unwrap();
+        assert_eq!(*app.world().get::<Transform>(root).unwrap(), first);
     }
 
     #[test]

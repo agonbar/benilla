@@ -694,11 +694,14 @@ version = "0.2.0"
 dependencies = [
  "benilla-app",
  "benilla-input",
+ "benilla-ui",
  "benilla-world",
  "bevy",
  "bevy_mod_openxr",
  "bevy_mod_xr",
  "openxr",
+ "serde",
+ "toml",
 ]
 
 [[package]]

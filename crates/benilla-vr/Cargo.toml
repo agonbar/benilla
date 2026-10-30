@@ -17,8 +17,11 @@ dev = ["benilla-app/dev", "benilla-input/dev"]
 # `default-features = false`, or a player build still gets benilla-app with `dev`.
 benilla-app = { path = "../benilla-app", default-features = false }
 benilla-input = { path = "../benilla-input", default-features = false }
+benilla-ui = { path = "../benilla-ui" }
 benilla-world = { path = "../benilla-world", default-features = false }
 bevy.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 # Vulkan only (the default feature). No `window_support`: it replaces benilla's `WindowPlugin`. The
 # loader is dlopened at runtime (`libopenxr_loader.so`), so the build needs no cmake.
 bevy_mod_openxr = "0.5"

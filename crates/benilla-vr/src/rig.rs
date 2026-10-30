@@ -19,11 +19,52 @@ pub fn yaw_only(rotation: Quat) -> Quat {
     Quat::from_rotation_y(rotation.to_euler(EulerRot::YXZ).0)
 }
 
-/// The tracking root's pose for the game camera at `game`: its position and yaw.
-pub fn root_pose(game: &Transform) -> Transform {
+/// The tracking root's pose for the game camera at `game`: its position and yaw, moved by the
+/// player's recentre `offset` ([`recentre_offset`]; identity until they recentre), in the root's
+/// own frame.
+pub fn root_pose(game: &Transform, offset: &Transform) -> Transform {
     Transform {
         translation: game.translation,
         rotation: yaw_only(game.rotation),
+        scale: Vec3::ONE,
+    }
+    .mul_transform(*offset)
+}
+
+/// Where the framing pivot sits above the avatar's feet, as a fraction of its collision height:
+/// `0.9 ×` the model's height where it has no head attachment (`0x50cbc0`).
+pub const PIVOT_FRACTION: f32 = 0.9;
+
+/// The tracking root in third person: level, behind the avatar's framing pivot along the game
+/// camera's yaw, as far from it as the game camera is (the zoom, less what collision took off).
+/// The game camera's pitch is dropped like its roll, so the head looks at the avatar level and a
+/// steep orbit does not put the player's eyes in the air. At zero zoom it is where [`root_pose`]
+/// puts the root. `body` is the avatar's feet and `body_height` its collision height.
+pub fn third_person_root(
+    body: Vec3,
+    body_height: f32,
+    game: &Transform,
+    offset: &Transform,
+) -> Transform {
+    let pivot = body + Vec3::Y * (body_height * PIVOT_FRACTION);
+    let rotation = yaw_only(game.rotation);
+    let zoom = game.translation.distance(pivot);
+    Transform {
+        translation: pivot + rotation * Vec3::Z * zoom,
+        rotation,
+        scale: Vec3::ONE,
+    }
+    .mul_transform(*offset)
+}
+
+/// The offset that puts the head, wherever it is in tracking space now, at the root's origin
+/// facing the root's forward: the inverse of the head's position and yaw. Pitch and roll stay the
+/// head's. Seated or standing, the player's eyes then sit at the game camera's height.
+pub fn recentre_offset(head: &Transform) -> Transform {
+    let yaw = yaw_only(head.rotation).inverse();
+    Transform {
+        translation: yaw * -head.translation,
+        rotation: yaw,
         scale: Vec3::ONE,
     }
 }
@@ -121,7 +162,7 @@ mod tests {
             -0.4,
             0.2,
         ));
-        let root = root_pose(&game);
+        let root = root_pose(&game, &Transform::IDENTITY);
         assert_eq!(root.translation, game.translation);
         let (yaw, pitch, roll) = root.rotation.to_euler(EulerRot::YXZ);
         assert!((yaw - 0.7).abs() < 1e-5);
@@ -132,7 +173,7 @@ mod tests {
     fn the_root_faces_where_the_game_camera_faces() {
         let game =
             Transform::from_xyz(0.0, 5.0, 0.0).looking_to(Vec3::new(1.0, -1.0, 0.0), Vec3::Y);
-        let facing = root_pose(&game).rotation * Vec3::NEG_Z;
+        let facing = root_pose(&game, &Transform::IDENTITY).rotation * Vec3::NEG_Z;
         assert!((facing - Vec3::X).length() < 1e-5, "{facing}");
     }
 
@@ -152,7 +193,7 @@ mod tests {
         eyes[1].pose.translation = Vec3::new(0.0, 0.0, -1.0);
         let game =
             Transform::from_xyz(10.0, 0.0, 0.0).with_rotation(Quat::from_rotation_y(FRAC_PI_2));
-        let world = root_pose(&game).mul_transform(head_centre(&eyes));
+        let world = root_pose(&game, &Transform::IDENTITY).mul_transform(head_centre(&eyes));
         // One unit ahead of the head, with the root turned 90° left: that is -X from the root.
         assert!((world.translation - Vec3::new(9.0, 0.0, 0.0)).length() < 1e-5);
     }
@@ -243,5 +284,100 @@ mod tests {
         assert_eq!(margin(0.0), MARGIN_AT_REST);
         assert!(margin(0.02) > margin(0.01));
         assert_eq!(margin(10.0), MARGIN_MAX);
+    }
+
+    #[test]
+    fn recentring_puts_the_head_at_the_root_facing_forward() {
+        let game = Transform::from_xyz(10.0, 2.0, -5.0).with_rotation(Quat::from_euler(
+            EulerRot::YXZ,
+            0.8,
+            -0.3,
+            0.0,
+        ));
+        // A head 0.4 m to the right and 0.3 m forward of the seat, up 0.5 m, turned 40° and
+        // looking 10° down.
+        let head = Transform::from_xyz(0.4, 0.5, -0.3).with_rotation(Quat::from_euler(
+            EulerRot::YXZ,
+            40.0f32.to_radians(),
+            -10.0f32.to_radians(),
+            0.0,
+        ));
+        let offset = recentre_offset(&head);
+        let world = root_pose(&game, &offset).mul_transform(head);
+        assert!(
+            (world.translation - game.translation).length() < 1e-5,
+            "{}",
+            world.translation
+        );
+        let (yaw, pitch, roll) = world.rotation.to_euler(EulerRot::YXZ);
+        let (want, ..) = game.rotation.to_euler(EulerRot::YXZ);
+        assert!((yaw - want).abs() < 1e-5, "{yaw} against {want}");
+        assert!((pitch + 10.0f32.to_radians()).abs() < 1e-5 && roll.abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_head_at_the_origin_facing_forward_needs_no_recentre() {
+        let offset = recentre_offset(&Transform::IDENTITY);
+        assert!(offset.translation.length() < 1e-6);
+        assert!(offset.rotation.angle_between(Quat::IDENTITY) < 1e-6);
+    }
+
+    #[test]
+    fn the_root_in_third_person_sits_behind_the_pivot_at_the_zoom_and_level() {
+        // The avatar at the origin, 2 yd tall: the pivot is 1.8 up. The game camera orbits it at
+        // 6 yd, 30° up, facing +X (yaw -90°).
+        let body = Vec3::ZERO;
+        let yaw = -FRAC_PI_2;
+        let pitch = -30.0f32.to_radians();
+        let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+        let pivot = Vec3::new(0.0, 1.8, 0.0);
+        let game = Transform::from_translation(pivot - rotation * Vec3::NEG_Z * 6.0)
+            .with_rotation(rotation);
+        let root = third_person_root(body, 2.0, &game, &Transform::IDENTITY);
+        // Behind the pivot along -X, 6 yd out, at the pivot's height.
+        assert!(
+            (root.translation - Vec3::new(-6.0, 1.8, 0.0)).length() < 1e-4,
+            "{}",
+            root.translation
+        );
+        let facing = root.rotation * Vec3::NEG_Z;
+        assert!((facing - Vec3::X).length() < 1e-5, "{facing}");
+        // The avatar is straight ahead of the root's eyes.
+        assert!(((pivot - root.translation).normalize() - facing).length() < 1e-5);
+    }
+
+    #[test]
+    fn a_collision_that_pulls_the_camera_in_pulls_the_root_in() {
+        let pivot = Vec3::new(0.0, 1.8, 0.0);
+        let near = Transform::from_translation(pivot + Vec3::new(0.0, 0.0, 2.0));
+        let far = Transform::from_translation(pivot + Vec3::new(0.0, 0.0, 5.0));
+        let a = third_person_root(Vec3::ZERO, 2.0, &near, &Transform::IDENTITY);
+        let b = third_person_root(Vec3::ZERO, 2.0, &far, &Transform::IDENTITY);
+        assert!((a.translation.distance(pivot) - 2.0).abs() < 1e-4);
+        assert!((b.translation.distance(pivot) - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn at_zero_zoom_third_person_is_first_person_at_the_pivot() {
+        let pivot = Vec3::new(3.0, 1.8, 4.0);
+        let game = Transform::from_translation(pivot).with_rotation(Quat::from_rotation_y(0.4));
+        let third = third_person_root(Vec3::new(3.0, 0.0, 4.0), 2.0, &game, &Transform::IDENTITY);
+        let first = root_pose(&game, &Transform::IDENTITY);
+        assert!((third.translation - first.translation).length() < 1e-5);
+        assert!(third.rotation.abs_diff_eq(first.rotation, 1e-6));
+    }
+
+    #[test]
+    fn the_offset_applies_in_the_roots_own_frame_in_both_persons() {
+        let game =
+            Transform::from_xyz(1.0, 2.0, 3.0).with_rotation(Quat::from_rotation_y(FRAC_PI_2));
+        let offset = Transform::from_xyz(0.0, 0.0, -1.0);
+        // One metre forward of the root along its facing (-X after a 90° turn left).
+        let root = root_pose(&game, &offset);
+        assert!(
+            (root.translation - Vec3::new(0.0, 2.0, 3.0)).length() < 1e-5,
+            "{}",
+            root.translation
+        );
     }
 }
