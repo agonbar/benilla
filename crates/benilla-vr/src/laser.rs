@@ -95,6 +95,7 @@ pub struct LaserPlugin;
 impl Plugin for LaserPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Aimed>()
+            .init_resource::<Laser>()
             .add_systems(
                 PreUpdate,
                 (

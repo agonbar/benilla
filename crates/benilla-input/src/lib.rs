@@ -213,6 +213,8 @@ enum Routed {
     Cursor(Option<Act>),
     /// A targeting press ([`soft`]): nothing is held, so its release does nothing.
     Soft,
+    /// `PADBACK` in gameplay mode: the mode and the keyboard read it ([`hold`]), not the bindings.
+    Back,
 }
 
 #[derive(Default)]
@@ -454,6 +456,7 @@ fn route_keys(
                 "cursor"
             }
             Some(Routed::Soft) => "soft",
+            Some(Routed::Back) => "mode",
             // Pressed while the pad was not looking (a stick direction the dead zone made up).
             None => continue,
         };
@@ -486,6 +489,17 @@ fn route_keys(
             continue;
         }
         if token == "PADBACK" {
+            rt.routed.insert(token, Routed::Back);
+            if trace.0 {
+                info!("pad: {token} down -> mode");
+            }
+            if routed_on.0 {
+                routed_out.write(PadRouted {
+                    token,
+                    pressed: true,
+                    what: "mode".into(),
+                });
+            }
             continue;
         }
         if !cursor_mode {
@@ -1189,6 +1203,15 @@ mod tests {
                 ("PADRTRIGGER", false, "cursor".to_owned())
             ]
         );
+
+        // The left menu in gameplay mode goes to the mode and the keyboard, and is still reported.
+        app.world_mut().resource_mut::<Laser>().on_panel = false;
+        hold(&mut app, &["PADBACK"]);
+        app.update();
+        assert_eq!(routed(&app), [("PADBACK", true, "mode".to_owned())]);
+        hold(&mut app, &[]);
+        app.update();
+        assert_eq!(routed(&app), [("PADBACK", false, "mode".to_owned())]);
     }
 
     #[test]

@@ -135,6 +135,8 @@ impl Plugin for HandsPlugin {
         let trace = std::env::var_os("WOW_VR_INPUT_TRACE").is_some_and(|v| v != "0");
         if trace {
             app.insert_resource(RoutedTrace(true))
+                .init_resource::<PadMode>()
+                .add_message::<PadRouted>()
                 .add_systems(Update, trace_input);
         }
         app.add_systems(Startup, create_actions.run_if(session_available))
