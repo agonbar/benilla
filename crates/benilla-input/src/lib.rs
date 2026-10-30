@@ -65,6 +65,30 @@ pub enum PadSystems {
     /// Reads the raw pad events into [`PadState`]. A source writes its `RawGamepadEvent`s, and
     /// sets [`Laser`], before it.
     Read,
+    /// Opens and closes the look session and feeds the camera. A source that turns the camera
+    /// itself ([`LookFeed`]) writes its motion after [`PadSystems::Read`] and before this.
+    Look,
+}
+
+/// Who moves the camera while gameplay mode holds the look session. The right stick does by
+/// default ([`look::motion`]). A source with a turn of its own (VR's snap and smooth turn) sets
+/// `external` and writes the mouse motion, in pixels, that it wants this frame to `motion`; the
+/// session, the loading cover and the ring's hold on the camera stay the pad's.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
+pub struct LookFeed {
+    pub external: bool,
+    pub motion: Vec2,
+}
+
+/// Set by a crate that gives both stick clicks held together a meaning of its own (VR's recentre):
+/// while the left click is down, the right click goes to no binding, so the chord does not also
+/// toggle autorun.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StickChord(pub bool);
+
+/// Whether the stick-click chord takes `token`: the right click while the left is down.
+fn chord_takes(token: &str, down: &BTreeSet<&'static str>) -> bool {
+    token == "PADRSTICK" && down.contains("PADLSTICK")
 }
 
 /// The mode the pad plays in, kept current for a source that reports it (VR's trace).
@@ -139,6 +163,8 @@ impl Plugin for PadPlugin {
             .insert_resource(cfg)
             .init_resource::<PadState>()
             .init_resource::<Laser>()
+            .init_resource::<LookFeed>()
+            .init_resource::<StickChord>()
             .init_resource::<PadMode>()
             .init_resource::<RoutedTrace>()
             .init_resource::<Runtime>()
@@ -162,7 +188,7 @@ impl Plugin for PadPlugin {
                     take_asks,
                     drive_cursor,
                     drive_text,
-                    drive_look,
+                    drive_look.in_set(PadSystems::Look),
                     push_state,
                 )
                     .chain()
@@ -226,6 +252,8 @@ enum Routed {
     Soft,
     /// `PADBACK` in gameplay mode: the mode and the keyboard read it ([`hold`]), not the bindings.
     Back,
+    /// The right stick click of a [`StickChord`]: nothing is held, so its release does nothing.
+    Chord,
 }
 
 #[derive(Default)]
@@ -433,6 +461,7 @@ fn route_keys(
     state: Res<PadState>,
     cfg: Res<PadConfig>,
     laser: Res<Laser>,
+    chord: Res<StickChord>,
     trace: Res<Trace>,
     routed_on: Res<RoutedTrace>,
     script: Option<NonSend<UiScript>>,
@@ -482,6 +511,7 @@ fn route_keys(
             }
             Some(Routed::Soft) => "soft",
             Some(Routed::Back) => "mode",
+            Some(Routed::Chord) => "chord",
             // Pressed while the pad was not looking (a stick direction the dead zone made up).
             None => continue,
         };
@@ -497,6 +527,17 @@ fn route_keys(
         }
     }
     for token in down {
+        if chord.0 && chord_takes(token, state.down()) {
+            rt.routed.insert(token, Routed::Chord);
+            if routed_on.0 {
+                routed_out.write(PadRouted {
+                    token,
+                    pressed: true,
+                    what: "chord".into(),
+                });
+            }
+            continue;
+        }
         if !cursor_mode && laser.tracked {
             rt.tap.down(token);
         }
@@ -834,6 +875,7 @@ fn drive_look(
     cover: CoverUp,
     host: Res<Host>,
     mouse: Res<ButtonInput<MouseButton>>,
+    mut feed: ResMut<LookFeed>,
     mut rt: ResMut<Runtime>,
     mut session: Local<look::Session>,
     mut script: Option<NonSendMut<UiScript>>,
@@ -860,12 +902,10 @@ fn drive_look(
         }
     }
     // The ring's stick picks an entry; the camera stays where it is while the ring is open.
-    if session.open && want && !covered && !host.ring_open() {
-        let delta = look::motion(state.right, &cfg, dt);
-        if delta != Vec2::ZERO {
-            motion.write(MouseMotion { delta });
-            rt.own.motion += 1;
-        }
+    let delta = look::feed(&mut feed, state.right, &cfg, dt);
+    if session.open && want && !covered && !host.ring_open() && delta != Vec2::ZERO {
+        motion.write(MouseMotion { delta });
+        rt.own.motion += 1;
     }
 }
 
@@ -950,6 +990,7 @@ mod tests {
             .add_message::<SoftTargetInput>()
             .init_resource::<PadState>()
             .init_resource::<Laser>()
+            .init_resource::<StickChord>()
             .init_resource::<PadMode>()
             .init_resource::<RoutedTrace>()
             .add_message::<PadRouted>()
@@ -985,6 +1026,36 @@ mod tests {
         m.iter_current_update_messages()
             .map(|b| (b.button, b.state))
             .collect()
+    }
+
+    #[test]
+    fn the_stick_chord_takes_the_right_click_only_while_the_left_is_down() {
+        let down = |t: &[&'static str]| t.iter().copied().collect::<BTreeSet<_>>();
+        assert!(chord_takes("PADRSTICK", &down(&["PADLSTICK", "PADRSTICK"])));
+        assert!(!chord_takes("PADRSTICK", &down(&["PADRSTICK"])));
+        assert!(!chord_takes(
+            "PADLSTICK",
+            &down(&["PADLSTICK", "PADRSTICK"])
+        ));
+
+        let mut off = app();
+        hold(&mut off, &["PADLSTICK", "PADRSTICK"]);
+        off.update();
+        let both: Vec<_> = bindings(&off).into_iter().map(|b| b.0).collect();
+        assert_eq!(both, ["PADLSTICK", "PADRSTICK"], "off, both are bindings");
+
+        let mut on = app();
+        on.world_mut().insert_resource(StickChord(true));
+        hold(&mut on, &["PADLSTICK", "PADRSTICK"]);
+        on.update();
+        assert_eq!(bindings(&on), [("PADLSTICK", true)], "on, jump only");
+        hold(&mut on, &[]);
+        on.update();
+        assert_eq!(
+            bindings(&on),
+            [("PADLSTICK", false)],
+            "the chord's release sends nothing"
+        );
     }
 
     #[test]

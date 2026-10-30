@@ -10,6 +10,7 @@
 use bevy::prelude::*;
 
 use crate::config::PadConfig;
+use crate::LookFeed;
 
 /// What the session does this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +52,16 @@ pub fn motion(right: Vec2, cfg: &PadConfig, dt: f32) -> Vec2 {
     let dir = right / m;
     let y = if cfg.look_invert_y { dir.y } else { -dir.y };
     Vec2::new(dir.x, y) * speed
+}
+
+/// The mouse motion for this frame: the stick's, or the external source's ([`LookFeed`]), whose
+/// motion is spent once so a turn that missed an open session is dropped, not kept for later.
+pub fn feed(feed: &mut LookFeed, right: Vec2, cfg: &PadConfig, dt: f32) -> Vec2 {
+    if feed.external {
+        std::mem::take(&mut feed.motion)
+    } else {
+        motion(right, cfg, dt)
+    }
 }
 
 #[cfg(test)]
@@ -109,5 +120,17 @@ mod tests {
         let half = motion(Vec2::new(0.5, 0.0), &cfg, 1.0).x;
         // Linear would be 450 pixels a second, half of `look_speed`.
         assert!(half < 450.0 && half > 0.0, "{half}");
+    }
+
+    #[test]
+    fn an_external_source_replaces_the_stick_and_is_spent_once() {
+        let cfg = PadConfig::default();
+        let mut f = LookFeed::default();
+        let stick = Vec2::new(1.0, 0.0);
+        assert_eq!(feed(&mut f, stick, &cfg, 1.0), motion(stick, &cfg, 1.0));
+        f.external = true;
+        f.motion = Vec2::new(174.0, 0.0);
+        assert_eq!(feed(&mut f, stick, &cfg, 1.0), Vec2::new(174.0, 0.0));
+        assert_eq!(feed(&mut f, stick, &cfg, 1.0), Vec2::ZERO, "spent");
     }
 }
