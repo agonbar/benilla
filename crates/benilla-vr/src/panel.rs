@@ -48,6 +48,7 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 use benilla_world::ffx_glow::FfxBackdrop;
 
 use crate::laser::Aimed;
+use crate::vignette;
 use benilla_world::view::NEARCLIP_DEFAULT;
 use bevy_mod_openxr::render::{update_views, XR_TEXTURE_INDEX};
 use bevy_mod_openxr::resources::OxrFrameState;
@@ -261,8 +262,12 @@ fn sync_session(
                 panel_size(aspect),
             );
             spawned.push(screen);
+            let ring = meshes.add(vignette::ring_mesh());
+            let ring_material = standard.add(vignette::material());
             for index in 0..2 {
-                spawned.push(spawn_overlay(&mut commands, index));
+                let overlay = spawn_overlay(&mut commands, index);
+                vignette::attach(&mut commands, overlay, index, &ring, &ring_material);
+                spawned.push(overlay);
             }
             spawned.push(spawn_mirror(&mut commands, &mut meshes, &mirror_material));
 
@@ -369,12 +374,13 @@ fn spawn_panel(
     panel
 }
 
-/// One overlay camera on the swapchain view of eye `index`: it draws only the panel's layer,
-/// above the world eye, non-HDR, with no tonemapping, no dither and no FFX component, so none of
-/// the world's grading touches the panel. Its main texture clears to transparent, and the blit
-/// into the swapchain blends premultiplied, `src + (1 - a) · eye`. That blit clears the view to
-/// black only when it is the first write of the frame (the world eye is dark behind the glue
-/// screens); otherwise it loads what the world eye drew.
+/// One overlay camera on the swapchain view of eye `index`: it draws only the panel's layer and
+/// its eye's vignette ring ([`vignette`]), above the world eye, non-HDR, with no tonemapping, no
+/// dither and no FFX component, so none of the world's grading touches the panel. Its main
+/// texture clears to transparent, and the blit into the swapchain blends premultiplied,
+/// `src + (1 - a) · eye`. That blit clears the view to black only when it is the first write of
+/// the frame (the world eye is dark behind the glue screens); otherwise it loads what the world
+/// eye drew.
 fn spawn_overlay(commands: &mut Commands, index: u32) -> Entity {
     commands
         .spawn((
@@ -386,7 +392,7 @@ fn spawn_overlay(commands: &mut Commands, index: u32) -> Entity {
                 ..default()
             }),
             RenderTarget::TextureView(ManualTextureViewHandle(XR_TEXTURE_INDEX + index)),
-            RenderLayers::layer(PANEL_RENDER_LAYER),
+            RenderLayers::from_layers(&[PANEL_RENDER_LAYER, vignette::layer(index)]),
             Msaa::Off,
             Tonemapping::None,
             DebandDither::Disabled,

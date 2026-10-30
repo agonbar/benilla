@@ -136,7 +136,7 @@ impl Rig {
         app.world_mut().spawn(XrTrackingRoot);
         Self {
             app,
-            root: rig::root_pose(&game),
+            root: rig::root_pose(&game, &Transform::IDENTITY),
         }
     }
 
