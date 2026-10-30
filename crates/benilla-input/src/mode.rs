@@ -30,6 +30,8 @@ pub struct Signals<'a> {
     pub back: bool,
     /// The left stick is out of its dead zone, and is the stick that walks.
     pub walk: bool,
+    /// A laser points at the UI panel.
+    pub pointing: bool,
 }
 
 #[derive(Debug, Default)]
@@ -39,6 +41,7 @@ pub struct Machine {
     manual: bool,
     panels: BTreeSet<String>,
     targeting: bool,
+    pointing: bool,
 }
 
 impl Machine {
@@ -50,16 +53,20 @@ impl Machine {
     pub fn step(&mut self, s: Signals) -> Mode {
         let opened = s.panels.difference(&self.panels).next().is_some();
         let armed = s.targeting && !self.targeting;
-        let cause = !s.panels.is_empty() || s.targeting;
+        let aimed = s.pointing && !self.pointing;
+        let cause = !s.panels.is_empty() || s.targeting || s.pointing;
+        // The left stick walks in cursor mode too, bound as it is; a laser on the panel keeps the
+        // mode, because walking with a hand up is not a wish to look away.
+        let walk = s.walk && !s.pointing;
         if s.back {
             self.mode = match self.mode {
                 Mode::Gameplay => Mode::Cursor,
                 Mode::Cursor => Mode::Gameplay,
             };
             self.manual = self.mode == Mode::Cursor;
-        } else if opened || armed {
+        } else if opened || armed || aimed {
             self.mode = Mode::Cursor;
-        } else if self.mode == Mode::Cursor && (s.walk || (!self.manual && !cause)) {
+        } else if self.mode == Mode::Cursor && (walk || (!self.manual && !cause)) {
             self.mode = Mode::Gameplay;
             self.manual = false;
         }
@@ -67,6 +74,7 @@ impl Machine {
             self.panels.clone_from(s.panels);
         }
         self.targeting = s.targeting;
+        self.pointing = s.pointing;
         self.mode
     }
 }
@@ -85,6 +93,7 @@ mod tests {
             targeting,
             back,
             walk,
+            pointing: false,
         })
     }
 
@@ -190,6 +199,48 @@ mod tests {
         step(&mut m, &["ContainerFrame1"], false, false, false);
         assert_eq!(
             step(&mut m, &["ContainerFrame1"], false, false, false),
+            Mode::Cursor
+        );
+    }
+
+    fn aim(m: &mut Machine, open: &[&str], pointing: bool, walk: bool) -> Mode {
+        m.step(Signals {
+            panels: &panels(open),
+            targeting: false,
+            back: false,
+            walk,
+            pointing,
+        })
+    }
+
+    #[test]
+    fn a_laser_on_the_panel_is_cursor_mode_and_leaving_it_is_gameplay() {
+        let mut m = Machine::default();
+        assert_eq!(aim(&mut m, &[], false, false), Mode::Gameplay);
+        assert_eq!(aim(&mut m, &[], true, false), Mode::Cursor);
+        assert_eq!(aim(&mut m, &[], true, false), Mode::Cursor);
+        assert_eq!(aim(&mut m, &[], false, false), Mode::Gameplay);
+    }
+
+    #[test]
+    fn walking_with_the_laser_on_the_panel_stays_in_cursor_mode() {
+        let mut m = Machine::default();
+        aim(&mut m, &[], true, false);
+        assert_eq!(aim(&mut m, &[], true, true), Mode::Cursor);
+        // Off the panel, a walk leaves a mode a window holds, as it does without a laser.
+        aim(&mut m, &["ContainerFrame1"], false, false);
+        assert_eq!(
+            aim(&mut m, &["ContainerFrame1"], false, true),
+            Mode::Gameplay
+        );
+    }
+
+    #[test]
+    fn an_open_window_holds_cursor_mode_after_the_laser_leaves() {
+        let mut m = Machine::default();
+        aim(&mut m, &["ContainerFrame1"], true, false);
+        assert_eq!(
+            aim(&mut m, &["ContainerFrame1"], false, false),
             Mode::Cursor
         );
     }
