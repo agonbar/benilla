@@ -393,6 +393,8 @@ impl Bubbles {
 pub(crate) struct BubbleFeed {
     pub(crate) geometry: Option<BubbleGeometry>,
     pub(crate) states: Vec<BubbleState>,
+    /// The bubbles draw to cards ([`crate::card_lane`]) and not to the screen.
+    pub(crate) cards: bool,
 }
 
 /// Units with a live bubble this frame, whose overhead name is suppressed (`+0xe64` ≠ 0).
@@ -416,12 +418,15 @@ fn drive_bubbles(
     time: Res<Time>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut feed: ResMut<BubbleFeed>,
+    mut lane: ResMut<crate::card_lane::CardLane>,
     // The speakers' meshes and their last-frame visibility, for [`speaker_drawn`].
     drawn: (Query<&Children>, Query<&ViewVisibility, With<Mesh3d>>),
 ) {
     active.0.clear();
     feed.states.clear();
     feed.geometry = None;
+    feed.cards = lane.enabled;
+    lane.cards.clear();
     let now = time.elapsed().as_millis() as u64;
     let self_tf = self_q.single().ok();
     // The typed sender lookup (`0x468460`), a linear scan of the small streamed set.
@@ -532,6 +537,15 @@ fn drive_bubbles(
         text_height: text_px(TEXT_H, basis) / seam,
         device_px: seam * scale,
     });
+    // Cards: a speaker's bubble is seated at its cell, in the virtual window the atlas stands for
+    // (`h` is the window's, which the extract flips by), and one with no cell left is not shown.
+    let geometry = feed.geometry.expect("set above");
+    let cell = crate::card_lane::cell_size(&geometry, seam);
+    if lane.enabled {
+        lane.begin(cell, &bubbles.stack);
+    }
+    let window_h = window.map_or(viewport.y, |w| w.height());
+    let mut published = Vec::new();
     feed.states = bubbles
         .stack
         .iter()
@@ -540,6 +554,29 @@ fn drive_bubbles(
             let (entity, _, tf) = find(*guid)?;
             // The anchor (`0x4b0c30`), from this frame's `Transform` and the latched lift.
             let anchor = tf.translation + Vec3::Y * (b.lift + LIFT);
+            if lane.enabled {
+                let cell = lane.cell_of(*guid)?;
+                let at = crate::card_lane::seat_in_cell(cell, &geometry, seam);
+                published.push(crate::card_lane::Card {
+                    key: *guid,
+                    anchor,
+                    alpha: f32::from(b.fade.alpha) / 255.0,
+                    shown: b.fade.shown,
+                    own: self_guid.0 == Some(*guid),
+                    seat: at,
+                    rect: None,
+                });
+                let p = at + crate::card_lane::CARD_ORIGIN;
+                return Some(BubbleState {
+                    key: *guid,
+                    line: b.line,
+                    text: b.text.clone(),
+                    colour: b.color,
+                    shown: b.fade.shown,
+                    alpha: f32::from(b.fade.alpha) / 255.0,
+                    seat: (p.x / seam, (window_h - p.y) / seam),
+                });
+            }
             let seat = cam.and_then(|(c, pose)| {
                 c.world_to_viewport(&GlobalTransform::from(*pose), anchor)
                     .ok()
@@ -568,6 +605,7 @@ fn drive_bubbles(
             })
         })
         .collect();
+    lane.publish(published);
 }
 
 /// The jitter decomposition (`WOW_MOVE_TRACE` tag `bub`): `anchor=` and `pos=` differ by a latched

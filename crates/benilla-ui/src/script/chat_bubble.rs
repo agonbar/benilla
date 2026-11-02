@@ -103,6 +103,8 @@ pub(crate) struct ChatBubbles {
     by_frame: HashMap<FrameHandle, usize>,
     /// The active list (`[0xb6f038]`) as the last sync left it: the live slots, farthest first.
     active: Vec<usize>,
+    /// The app draws each bubble to a card of its own ([`UiScript::set_chat_bubble_cards`]).
+    pub(super) cards: bool,
 }
 
 impl UiScript {
@@ -139,6 +141,17 @@ impl UiScript {
         }
     }
 
+    /// Draw each bubble to a card, not to the screen: its quads come out of
+    /// [`UiScript::extract`] tagged with the speaker, and the frame keeps alpha 1 so a fade does
+    /// not change a quad; the app carries the fade to the card itself. Deviation: a bubble addon
+    /// that reads `GetAlpha` sees 1 through the fade, where the reference's frame carries the
+    /// fade (`0x4b0d4f`, `0x4b0dc3`). Off outside the headset.
+    pub fn set_chat_bubble_cards(&mut self, on: bool) {
+        let lua = self.lua();
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        model.chat_bubbles.cards = on;
+    }
+
     /// How many bubble widgets the pool holds.
     pub fn chat_bubble_pool_len(&self) -> usize {
         let lua = self.lua();
@@ -150,6 +163,20 @@ impl UiScript {
 /// Whether `frame` is a pooled bubble.
 pub(super) fn is_bubble(model: &Model, frame: FrameHandle) -> bool {
     model.chat_bubbles.by_frame.contains_key(&frame)
+}
+
+/// The speaker whose live bubble `frame` is, or sits under (a bubble addon parents its own frames
+/// to the bubble).
+pub(super) fn card_key(model: &Model, frame: FrameHandle) -> Option<u64> {
+    let cb = &model.chat_bubbles;
+    let mut at = Some(frame);
+    while let Some(f) = at {
+        if let Some(&i) = cb.by_frame.get(&f) {
+            return cb.bubbles[i].line.map(|(key, _)| key);
+        }
+        at = model.arena.frame(f)?.parent;
+    }
+    None
 }
 
 /// How many new bubbles [`sync`] builds for `states`: the new lines (a key without a live line of
@@ -460,12 +487,13 @@ fn drive(
         .saturating_add(FIRST_LEVEL);
     model.arena.set_frame_level(frame, level, false);
 
-    if model
-        .arena
-        .frame(frame)
-        .is_some_and(|f| f.alpha != state.alpha)
-    {
-        model.arena.set_alpha(frame, state.alpha);
+    let alpha = if model.chat_bubbles.cards {
+        1.0
+    } else {
+        state.alpha
+    };
+    if model.arena.frame(frame).is_some_and(|f| f.alpha != alpha) {
+        model.arena.set_alpha(frame, alpha);
     }
     if shown != state.shown {
         model.chat_bubbles.bubbles[i].shown = state.shown;

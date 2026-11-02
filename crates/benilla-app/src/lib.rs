@@ -30,6 +30,7 @@ mod bindings;
 mod blob_shadow;
 mod bowstring;
 mod camera_shake;
+pub mod card_lane;
 #[cfg(feature = "dev")]
 mod capture;
 mod chat_bubble;

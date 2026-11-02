@@ -15,5 +15,6 @@ pub(crate) fn feed_bubbles(
     let (Some(mut script), Some(geometry)) = (script, feed.geometry) else {
         return;
     };
+    script.set_chat_bubble_cards(feed.cards);
     script.sync_chat_bubbles(geometry, &feed.states);
 }
