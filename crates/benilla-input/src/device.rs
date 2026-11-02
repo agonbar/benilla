@@ -155,6 +155,11 @@ impl PadDevice {
     /// Whether an event from `pad` is read, and who is active after it. `counts` is whether the
     /// event is input and not the noise of a resting stick.
     fn accept(&mut self, pad: Entity, counts: bool, now: f32) -> bool {
+        // A pad gilrs reported gone: what its dying node still queued is not input, and nothing
+        // would release a button it left down.
+        if !self.pads.contains_key(&pad) {
+            return false;
+        }
         if let Device::Pinned { vendor, product } = self.cfg.device {
             let hit = self
                 .pads
@@ -446,6 +451,35 @@ mod tests {
         // The survivor is active on its next input at once, with no silence to wait out.
         button(&mut d, b, GamepadButton::North, 1.0, 1.2);
         assert_eq!(d.active(), Some(b));
+    }
+
+    /// A pad whose node vanished and came back is a new gamepad entity: it plays at once, and the
+    /// old one's held inputs did not outlive it.
+    #[test]
+    fn a_pad_that_returns_after_its_node_vanished_plays_again() {
+        let mut d = device();
+        let (gone, back) = (pad(1), pad(2));
+        connect(&mut d, gone, 0x28de, 0x11ff);
+        button(&mut d, gone, GamepadButton::South, 1.0, 1.0);
+        assert!(d.state().is_down("PAD1"));
+        d.handle(
+            &RawGamepadEvent::Connection(GamepadConnectionEvent::new(
+                gone,
+                GamepadConnection::Disconnected,
+            )),
+            2.0,
+        );
+        assert!(!d.connected());
+        assert_eq!(*d.state(), PadState::default());
+        // Events a dying node still queued are not a pad.
+        button(&mut d, gone, GamepadButton::East, 1.0, 2.1);
+        assert_eq!(*d.state(), PadState::default());
+
+        connect(&mut d, back, 0x28de, 0x11ff);
+        assert!(d.connected());
+        button(&mut d, back, GamepadButton::North, 1.0, 3.0);
+        assert_eq!(d.active(), Some(back));
+        assert!(d.state().is_down("PAD4"));
     }
 
     #[test]

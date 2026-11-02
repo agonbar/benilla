@@ -26,6 +26,7 @@ mod device;
 mod glyphs;
 mod hold;
 mod host;
+mod hotplug;
 mod keyboard;
 mod layers;
 mod look;
@@ -134,6 +135,7 @@ pub fn run(build: BuildId) -> AppExit {
 
 /// The plugin group hook that turns gilrs on. A launcher that composes more hooks (VR) calls it.
 pub fn enable_gilrs(group: PluginGroupBuilder) -> PluginGroupBuilder {
+    hotplug::watch_dev_input_in_container();
     group.enable::<bevy::gilrs::GilrsPlugin>()
 }
 
