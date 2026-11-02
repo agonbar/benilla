@@ -748,13 +748,21 @@ fn load_config(world: &mut World) {
         cvars.own_for_session("gxApi", None);
         cvars.announce_locale_defaults();
         match stored {
-            StoredConfig::Absent => {} // no file, hermetic capture, or no install
+            StoredConfig::Absent => {
+                // No file, hermetic capture, or no install. A dev build run away from the machine
+                // that built it looks for its folder at the build's path, so the log names it.
+                let path = crate::local_state::config_path();
+                info!("config: no config.toml at {path:?}, running on defaults");
+            }
             StoredConfig::Bad(msg) => {
                 // A malformed file is kept: nothing loads, and nothing saves over it until a
                 // change.
                 warn!("{msg}");
             }
-            StoredConfig::Table(table) => cvars.load_file(table),
+            StoredConfig::Table(table) => {
+                info!("config: read {} entries from config.toml", table.len());
+                cvars.load_file(table);
+            }
         }
         cvars.log_console_lines();
         cvars.take_events()
@@ -2145,6 +2153,37 @@ mod tests {
         assert!(!text.contains("MasterVolume"), "defaults stay out:\n{text}");
         let back: LocalConfig = toml::from_str(&text).unwrap();
         assert_eq!(back.cvars.len(), 1, "a diff, not a dump: {text}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The saved `realmName` is what the glue VM's connect step reads (`glue_mgr::drive_glue_mgr`
+    /// takes the name off the glue VM's mirror), with no `WOW_REALM` in the env.
+    #[test]
+    fn the_saved_realm_name_reaches_the_glue_vm() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = std::env::temp_dir().join(format!("benilla-cvar-realm-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _r = EnvGuard::unset("WOW_REALM");
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        crate::local_state::write_atomic(
+            &tmp.join("config.toml"),
+            "[cvars]\nrealmName = \"VMaNGOS\"\n",
+        )
+        .unwrap();
+        let mut app = cvar_app();
+        app.insert_non_send_resource(UiScript::new_glue().unwrap());
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .cvar("realmName")
+                .as_deref(),
+            Some("VMaNGOS")
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
