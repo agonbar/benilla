@@ -411,7 +411,10 @@ fn extraction_keeps_a_bubble_seated_outside_the_window() {
     let drawn: Vec<_> = quads
         .iter()
         .filter(|q| {
-            matches!(q.content, QuadContent::Texture { .. } | QuadContent::Text { .. })
+            matches!(
+                q.content,
+                QuadContent::Texture { .. } | QuadContent::Text { .. }
+            )
         })
         .collect();
     assert!(
@@ -421,7 +424,10 @@ fn extraction_keeps_a_bubble_seated_outside_the_window() {
     );
     for q in drawn {
         let r = q.rect.expect("a bubble region resolves outside the window");
-        assert!(r.left > 4000.0 && r.top < 0.0, "{r:?} is where it was seated");
+        assert!(
+            r.left > 4000.0 && r.top < 0.0,
+            "{r:?} is where it was seated"
+        );
     }
 }
 
@@ -430,9 +436,11 @@ fn extraction_keeps_a_bubble_seated_outside_the_window() {
 #[test]
 fn cards_tag_the_bubble_subtree_by_speaker() {
     let mut s = vm();
-    s.run(r#"Other = CreateFrame("Frame", nil, WorldFrame) Other:SetAllPoints()
-             Other.t = Other:CreateTexture() Other.t:SetAllPoints() Other.t:SetTexture(1, 1, 1)"#)
-        .unwrap();
+    s.run(
+        r#"Other = CreateFrame("Frame", nil, WorldFrame) Other:SetAllPoints()
+             Other.t = Other:CreateTexture() Other.t:SetAllPoints() Other.t:SetTexture(1, 1, 1)"#,
+    )
+    .unwrap();
     drive(&mut s, &[say(7, 1, "Well met!"), say(9, 1, "Hello")]);
     assert!(s.extract().iter().all(|q| q.card.is_none()), "flat play");
 
@@ -454,7 +462,10 @@ fn cards_tag_the_bubble_subtree_by_speaker() {
         "textures are tagged"
     );
     let untagged = quads.iter().filter(|q| q.card.is_none()).count();
-    assert!(untagged >= 1, "the WorldFrame's own frames stay on the screen");
+    assert!(
+        untagged >= 1,
+        "the WorldFrame's own frames stay on the screen"
+    );
 }
 
 /// With cards on the frame keeps alpha 1 through a fade, so the quads do not change and the card

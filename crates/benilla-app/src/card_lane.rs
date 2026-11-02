@@ -24,9 +24,7 @@ use bevy::camera::{CameraOutputMode, ClearColorConfig, ImageRenderTarget, Render
 use bevy::image::{Image, ImageSampler};
 use bevy::math::Rect;
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat, TextureUsages,
-};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 
 use crate::ui_pass::UiQuad;
 
@@ -139,8 +137,8 @@ impl CardLane {
     /// Take the tagged quads in draw order; `true` when they differ from the ones the atlas was
     /// last drawn from, which also publishes their bounds and sets the camera to run.
     pub(crate) fn gather(&mut self, tagged: &[&UiQuad]) -> bool {
-        let same = self.last.len() == tagged.len()
-            && self.last.iter().zip(tagged).all(|(a, b)| a == *b);
+        let same =
+            self.last.len() == tagged.len() && self.last.iter().zip(tagged).all(|(a, b)| a == *b);
         if same {
             return false;
         }
@@ -343,7 +341,10 @@ mod tests {
         lane.begin(cell, &[2, 1]);
         assert_eq!(lane.cell_of(1), Some(a), "kept while it speaks");
         assert_eq!(lane.cell_of(2), Some(b));
-        assert_eq!(lane.cell_of(3).map(|c| c.min), Some(lane.cell_of(3).unwrap().min));
+        assert_eq!(
+            lane.cell_of(3).map(|c| c.min),
+            Some(lane.cell_of(3).unwrap().min)
+        );
         lane.begin(cell, &[4]);
         assert_eq!(lane.cell_of(4), Some(a), "the first free cell is reused");
 
@@ -460,7 +461,11 @@ mod tests {
 
         app.world_mut().resource_mut::<CardLane>().enabled = true;
         app.update();
-        assert_eq!(cameras(&mut app), [true], "the first frame clears the atlas");
+        assert_eq!(
+            cameras(&mut app),
+            [true],
+            "the first frame clears the atlas"
+        );
         app.update();
         assert_eq!(cameras(&mut app), [false], "then it sleeps");
         app.world_mut().resource_mut::<CardLane>().raster = true;
