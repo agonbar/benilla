@@ -444,6 +444,15 @@ impl UiScript {
                     rank,
                 });
             }
+            let card = if model.chat_bubbles.cards {
+                let frame = match target {
+                    ZTarget::Frame(fh) => Some(fh),
+                    ZTarget::Region(rh) => model.arena.region(rh).map(|r| r.owner),
+                };
+                frame.and_then(|f| super::chat_bubble::card_key(&model, f))
+            } else {
+                None
+            };
             out.push(ExtractedQuad {
                 target,
                 z,
@@ -452,6 +461,7 @@ impl UiScript {
                 content,
                 clip,
                 scale,
+                card,
             });
             // A ScrollingMessageFrame adds one Text quad per visible ring line, stacked bottom-up
             // with each line's fade alpha; the ring lives in its kind state, not in FontStrings.
