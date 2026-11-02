@@ -209,7 +209,7 @@ pub struct CardLaneSet;
 #[derive(Component)]
 struct CardCamera;
 
-pub(crate) struct CardLanePlugin;
+pub struct CardLanePlugin;
 
 impl Plugin for CardLanePlugin {
     fn build(&self, app: &mut App) {
