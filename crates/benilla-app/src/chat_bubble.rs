@@ -671,6 +671,7 @@ impl Plugin for ChatBubblePlugin {
             .init_resource::<Bubbles>()
             .init_resource::<BubblesActive>()
             .init_resource::<BubbleFeed>()
+            .init_resource::<crate::card_lane::CardLane>()
             // After the V-plate drive, whose verdict the spawn gate reads, and before the script
             // paint, so a bubble draws the frame it moves.
             .add_systems(
@@ -823,6 +824,7 @@ mod tests {
             .init_resource::<Bubbles>()
             .init_resource::<BubblesActive>()
             .init_resource::<BubbleFeed>()
+            .init_resource::<crate::card_lane::CardLane>()
             .init_resource::<VPlates>()
             .init_resource::<SelfGuid>()
             .init_resource::<Time>()

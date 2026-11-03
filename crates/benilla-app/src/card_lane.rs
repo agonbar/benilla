@@ -1,6 +1,6 @@
 //! The card lane: a headset crate asks for each chat bubble to be drawn to an atlas cell instead of
 //! the screen, and shows the cell as a quad in the world. The reference draws a bubble on the
-//! screen (`0x4b0940`); 1.12.1 has no headset, so none of this is in the reference.
+//! screen (`0x4b0c30`); 1.12.1 has no headset, so none of this is in the reference.
 //!
 //! With [`CardLane::enabled`] set, three things change and nothing else does:
 //!
@@ -24,9 +24,7 @@ use bevy::camera::{CameraOutputMode, ClearColorConfig, ImageRenderTarget, Render
 use bevy::image::{Image, ImageSampler};
 use bevy::math::Rect;
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat, TextureUsages,
-};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 
 use crate::ui_pass::UiQuad;
 
@@ -139,8 +137,8 @@ impl CardLane {
     /// Take the tagged quads in draw order; `true` when they differ from the ones the atlas was
     /// last drawn from, which also publishes their bounds and sets the camera to run.
     pub(crate) fn gather(&mut self, tagged: &[&UiQuad]) -> bool {
-        let same = self.last.len() == tagged.len()
-            && self.last.iter().zip(tagged).all(|(a, b)| a == *b);
+        let same =
+            self.last.len() == tagged.len() && self.last.iter().zip(tagged).all(|(a, b)| a == *b);
         if same {
             return false;
         }
@@ -209,18 +207,18 @@ pub struct CardLaneSet;
 
 /// Marker on the card camera.
 #[derive(Component)]
-struct CardCamera;
+pub(crate) struct CardCamera;
 
-pub(crate) struct CardLanePlugin;
+pub struct CardLanePlugin;
 
 impl Plugin for CardLanePlugin {
     fn build(&self, app: &mut App) {
+        // `run_camera` is ordered in the chain of the two UI views ([`crate::ui_pass`]).
         app.init_resource::<CardLane>().add_systems(
             Update,
-            (
-                sync_atlas.before(CardLaneSet),
-                run_camera.after(CardLaneSet),
-            ),
+            sync_atlas
+                .before(CardLaneSet)
+                .before(crate::chat_bubble::BubbleSet),
         );
     }
 }
@@ -298,7 +296,10 @@ fn sync_atlas(
 }
 
 /// The camera draws the whole atlas when it runs, so it runs only on a frame the cards changed.
-fn run_camera(mut lane: ResMut<CardLane>, mut camera: Query<&mut Camera, With<CardCamera>>) {
+pub(crate) fn run_camera(
+    mut lane: ResMut<CardLane>,
+    mut camera: Query<&mut Camera, With<CardCamera>>,
+) {
     let want = std::mem::take(&mut lane.raster);
     for mut cam in &mut camera {
         if cam.is_active != want {
@@ -306,6 +307,9 @@ fn run_camera(mut lane: ResMut<CardLane>, mut camera: Query<&mut Camera, With<Ca
         }
     }
 }
+
+#[cfg(test)]
+mod gpu_tests;
 
 #[cfg(test)]
 mod tests {
@@ -343,7 +347,10 @@ mod tests {
         lane.begin(cell, &[2, 1]);
         assert_eq!(lane.cell_of(1), Some(a), "kept while it speaks");
         assert_eq!(lane.cell_of(2), Some(b));
-        assert_eq!(lane.cell_of(3).map(|c| c.min), Some(lane.cell_of(3).unwrap().min));
+        assert_eq!(
+            lane.cell_of(3).map(|c| c.min),
+            Some(lane.cell_of(3).unwrap().min)
+        );
         lane.begin(cell, &[4]);
         assert_eq!(lane.cell_of(4), Some(a), "the first free cell is reused");
 
@@ -460,7 +467,11 @@ mod tests {
 
         app.world_mut().resource_mut::<CardLane>().enabled = true;
         app.update();
-        assert_eq!(cameras(&mut app), [true], "the first frame clears the atlas");
+        assert_eq!(
+            cameras(&mut app),
+            [true],
+            "the first frame clears the atlas"
+        );
         app.update();
         assert_eq!(cameras(&mut app), [false], "then it sleeps");
         app.world_mut().resource_mut::<CardLane>().raster = true;
