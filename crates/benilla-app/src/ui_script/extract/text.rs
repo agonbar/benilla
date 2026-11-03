@@ -169,6 +169,7 @@ pub(super) fn emit(
                 rotation: 0.0,
                 mask: None,
                 corners: None,
+                card: None,
             });
         }
     }
@@ -367,6 +368,7 @@ pub(super) fn emit(
                 rotation: 0.0,
                 mask: None,
                 corners: None,
+                card: None,
             });
         }
     }

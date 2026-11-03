@@ -84,12 +84,27 @@ impl UiScript {
             let Some(clip) = clips.clip(scope) else {
                 continue;
             };
+            // A card quad is drawn as if its bubble's alpha were 1: the fade is the card's.
+            let bubble = if model.chat_bubbles.cards {
+                let frame = match target {
+                    ZTarget::Frame(fh) => Some(fh),
+                    ZTarget::Region(rh) => model.arena.region(rh).map(|r| r.owner),
+                };
+                frame.and_then(|f| super::chat_bubble::card_key(&model, f))
+            } else {
+                None
+            };
+            let card = bubble.map(|(key, _)| key);
+            let carried = |f: &crate::widget::Frame| match bubble {
+                Some((_, fade)) if f.effective_alpha == fade => 1.0,
+                _ => f.effective_alpha,
+            };
             // A region's texture, which ranks it in the batch sort.
             let mut region_tex = None;
             let (rect, alpha, content, clip, scale) = match target {
                 ZTarget::Frame(fh) => {
                     let frame = model.arena.frame(fh);
-                    let alpha = frame.map(|f| f.effective_alpha).unwrap_or(1.0);
+                    let alpha = frame.map(carried).unwrap_or(1.0);
                     let scale = frame.map(|f| f.effective_scale).unwrap_or(1.0);
                     let content = match frame.map(|f| &f.kind_state) {
                         Some(crate::widget::KindState::Minimap(m)) => QuadContent::Minimap {
@@ -272,8 +287,7 @@ impl UiScript {
                     region_tex = data.tex.id();
                     // One hop (region combine `0x772180`): the region's alpha times its owner's
                     // `effective_alpha`, which `SetAlpha 0x76a690` already carries down the tree.
-                    let alpha = owner_frame.map(|f| f.effective_alpha).unwrap_or(1.0)
-                        * data.alpha.unwrap_or(1.0);
+                    let alpha = owner_frame.map(carried).unwrap_or(1.0) * data.alpha.unwrap_or(1.0);
                     if let Some(fo) = state_font {
                         // The font object's paint, behind the severance mask (`font_explicit`) on
                         // every axis as in `font::repaint`: an axis the label set itself stays.
@@ -452,6 +466,7 @@ impl UiScript {
                 content,
                 clip,
                 scale,
+                card,
             });
             // A ScrollingMessageFrame adds one Text quad per visible ring line, stacked bottom-up
             // with each line's fade alpha; the ring lives in its kind state, not in FontStrings.

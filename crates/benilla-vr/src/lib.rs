@@ -11,11 +11,15 @@
 //! The Touch controllers are a pad for `benilla-input` (`hands`, `touch`), and the right one is a
 //! laser that points at the UI panel and clicks, drags and scrolls on it (`laser`).
 //!
+//! Chat bubbles hang over their speakers as cards in the world (`cards`), the bubble frames drawn
+//! to an atlas by the client's card lane and shown as quads at the speaker's depth.
+//!
 //! Comfort (`comfort`, `steer`, `vignette`) is first or third person, snap or smooth turn, a
 //! vignette and a recentre, all set in `vr.toml`.
 //!
 //! Without OpenXR (no loader, runtime or headset) [`run`] is the flat client.
 
+mod cards;
 mod comfort;
 mod glare;
 mod hands;
@@ -128,6 +132,7 @@ impl Plugin for VrPlugin {
             .insert_resource(benilla_world::ffx_glow::NoScreenWarp)
             .add_plugins((
                 panel::PanelPlugin,
+                cards::CardsPlugin,
                 hands::HandsPlugin,
                 laser::LaserPlugin,
                 ComfortPlugin,

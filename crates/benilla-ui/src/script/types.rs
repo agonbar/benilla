@@ -330,6 +330,10 @@ pub struct ExtractedQuad {
     /// The owner's `effective_scale` (`0x76ac90`), already in `rect`; a `Text` quad's font and
     /// shadow offset must be scaled by it too.
     pub scale: f32,
+    /// The speaker whose chat bubble this quad belongs to, set only while the app asks for cards
+    /// ([`UiScript::set_chat_bubble_cards`](super::UiScript::set_chat_bubble_cards)): the quad is
+    /// drawn to that speaker's card, not to the screen.
+    pub card: Option<u64>,
 }
 
 /// A two-stop gradient (`SetGradientAlpha`/`SetGradient`, XML `<Gradient>`): the four-colour form

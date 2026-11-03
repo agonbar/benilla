@@ -1124,6 +1124,52 @@ pub(super) fn paint_script(
 fn convert_entry(
     eq: benilla_ui::script::ExtractedQuad,
     s: f32,
+    w: f32,
+    h: f32,
+    dpi: f32,
+    assets: &mut Option<ResMut<WorldAssets>>,
+    images: &mut Assets<Image>,
+    font_atlas: &mut Option<ResMut<UiFontAtlas>>,
+    booths: &mut crate::portrait::BoothBridge,
+    text_ui: Option<&benilla_ui::script::EditBoxTextUi>,
+    caret_pinned: bool,
+    out: &mut Vec<UiQuad>,
+    link_spans: &mut Vec<(
+        benilla_ui::widget::FrameHandle,
+        benilla_ui::layout::Rect,
+        String,
+        String,
+    )>,
+    minimap_slot: &mut Option<crate::minimap::MinimapSlot>,
+) {
+    let (card, from) = (eq.card, out.len());
+    convert_untagged(
+        eq,
+        s,
+        w,
+        h,
+        dpi,
+        assets,
+        images,
+        font_atlas,
+        booths,
+        text_ui,
+        caret_pinned,
+        out,
+        link_spans,
+        minimap_slot,
+    );
+    // A bubble's quads go to its speaker's card ([`crate::card_lane`]).
+    if card.is_some() {
+        for quad in &mut out[from..] {
+            quad.card = card;
+        }
+    }
+}
+
+fn convert_untagged(
+    eq: benilla_ui::script::ExtractedQuad,
+    s: f32,
     // The window in logical px: `h` flips y, `w` gives model tiles the screen diagonal.
     w: f32,
     h: f32,

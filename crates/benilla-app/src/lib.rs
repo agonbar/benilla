@@ -32,6 +32,7 @@ mod bowstring;
 mod camera_shake;
 #[cfg(feature = "dev")]
 mod capture;
+pub mod card_lane;
 mod chat_bubble;
 mod chr_classes;
 mod cinematic;

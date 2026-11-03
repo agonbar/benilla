@@ -114,6 +114,9 @@ pub(crate) struct UiQuad {
     /// Explicit screen corners (y-down px) drawn as the fan `(0,1,2)(0,2,3)` (the cooldown pie's
     /// wedge), bypassing `rotation`, `clip` and `rect`, which should still bound them.
     pub corners: Option<[Vec2; 4]>,
+    /// The speaker whose chat bubble card this quad is drawn to ([`crate::card_lane`]); `None` is
+    /// the screen. Set by the script extract, only while a headset asks for cards.
+    pub card: Option<u64>,
 }
 
 /// A screen-anchored alpha mask over a [`UiQuad`].
@@ -145,6 +148,7 @@ impl Default for UiQuad {
             rotation: 0.0,
             mask: None,
             corners: None,
+            card: None,
         }
     }
 }
@@ -196,7 +200,7 @@ pub(crate) struct UiQuadBatch;
 
 /// The shared 1×1 opaque white that texture-less quads sample.
 #[derive(Resource)]
-struct UiWhiteTexture(Handle<Image>);
+pub(crate) struct UiWhiteTexture(pub(crate) Handle<Image>);
 
 /// The quad material: a texture and the [`UiQuad`] flags as uniforms, drawn through one
 /// premultiplied-alpha pipeline (`ui_quad.wgsl`). It holds no colour, so it is its identity key
@@ -360,6 +364,7 @@ impl Plugin for PlayerUiPlugin {
             .init_resource::<UiMeshCost>()
             .init_resource::<crate::ui_script::UiCostWanted>()
             .add_plugins((
+                crate::card_lane::CardLanePlugin,
                 Material2dPlugin::<UiQuadMaterial>::default(),
                 // The lane's decode is not optional, so this plugin owns it.
                 crate::ui_gamma::UiGammaPlugin,
@@ -372,9 +377,21 @@ impl Plugin for PlayerUiPlugin {
                 UiQuadAppend.after(benilla_world::schedule::WorldStage::Input),
             )
             .add_systems(Update, clear_ui_overlays.before(UiQuadAppend))
-            .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend))
+            .add_systems(Update, rebuild_views().after(UiQuadAppend))
             .add_systems(Last, count_material_events);
     }
+}
+
+/// The card view first: it leaves `dirty` for the screen view to clear. Between them the card
+/// camera is woken or put to sleep for the frame.
+pub(crate) fn rebuild_views(
+) -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+    (
+        rebuild_ui_mesh::<true>.in_set(crate::card_lane::CardLaneSet),
+        crate::card_lane::run_camera,
+        rebuild_ui_mesh::<false>,
+    )
+        .chain()
 }
 
 /// The full-window player-UI camera: the world, then the quads, then the gamma decode.
@@ -614,7 +631,7 @@ fn count_material_events(
 /// The rebuild's state across frames, so a rebuild pays only for what changed: batch entities and
 /// meshes pooled by run index and rewritten in place, materials cached by their identity key.
 #[derive(Default)]
-struct BatchPools {
+pub(crate) struct BatchPools {
     entities: Vec<Entity>,
     meshes: Vec<Handle<Mesh>>,
     /// Each slot's last-written mesh (base positions): an unchanged run is not rewritten.
@@ -751,7 +768,9 @@ pub(crate) struct UiMeshCost {
     pub(crate) rewrites: usize,
 }
 
-fn rebuild_ui_mesh(
+/// `CARDS = false` draws the screen's quads, `CARDS = true` the tagged ones ([`UiQuad::card`]) into
+/// the card atlas ([`crate::card_lane`]), in the atlas' own px space and render layer.
+pub(crate) fn rebuild_ui_mesh<const CARDS: bool>(
     mut quads: ResMut<UiQuads>,
     mut commands: Commands,
     mut stores: RebuildStores,
@@ -760,6 +779,7 @@ fn rebuild_ui_mesh(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut mesh_cost: ResMut<UiMeshCost>,
     cost_wanted: Res<crate::ui_script::UiCostWanted>,
+    mut lane: Option<ResMut<crate::card_lane::CardLane>>,
 ) {
     // Forget the materials of removed images first, before any early return, since a missed read
     // leaks: a cached material holds a strong image handle and, prepared, its GPU texture.
@@ -796,7 +816,13 @@ fn rebuild_ui_mesh(
     }
     // The meter is off unless asked (the hover recorder, `WOW_UI_COST=1`): one bool test.
     let cost_on = cost_wanted.0 || crate::ui_script::extract::ui_cost_enabled();
-    *mesh_cost = UiMeshCost::default();
+    if CARDS && !lane.as_deref().is_some_and(|l| l.enabled) {
+        retire_batches(&mut pools, &mut commands);
+        return;
+    }
+    if !CARDS {
+        *mesh_cost = UiMeshCost::default();
+    }
     let t_rebuild = cost_on.then(std::time::Instant::now);
     let mut t_mark = t_rebuild;
     let mut lap = move || -> u128 {
@@ -809,12 +835,12 @@ fn rebuild_ui_mesh(
     };
     let (meshes, materials) = (&mut stores.0, &mut stores.1);
     let q = quads.as_mut();
-    if !q.dirty && q.overlays == q.last_overlays {
+    if !q.dirty && (CARDS || q.overlays == q.last_overlays) {
         return;
     }
     // `WOW_UI_DIFF=1`: names what re-triggered the rebuild, the base lane's dirty flag or the
     // first differing overlay quad.
-    if *UI_DIFF {
+    if *UI_DIFF && !CARDS {
         if q.dirty {
             eprintln!("[ui-diff] BASE lane dirty");
         } else {
@@ -844,8 +870,10 @@ fn rebuild_ui_mesh(
             }
         }
     }
-    q.dirty = false;
-    q.last_overlays.clone_from(&q.overlays);
+    if !CARDS {
+        q.dirty = false;
+        q.last_overlays.clone_from(&q.overlays);
+    }
 
     let (Ok(window), Some(white)) = (windows.single(), white) else {
         // No window, or the white texture not built yet: nothing to draw, and the flag stays
@@ -854,7 +882,7 @@ fn rebuild_ui_mesh(
         return;
     };
     let lanes_empty = q.quads.is_empty() && q.overlays.is_empty();
-    if lanes_empty {
+    if lanes_empty && !CARDS {
         retire_batches(&mut pools, &mut commands);
         q.dirty = false;
         q.last_overlays.clone_from(&q.overlays);
@@ -863,17 +891,39 @@ fn rebuild_ui_mesh(
 
     // Screen px (y-down, top-left origin) to the camera's world space (y-up, centred): the default
     // `OrthographicProjection`, one unit per logical px.
-    let (half_w, half_h) = (window.width() * 0.5, window.height() * 0.5);
-    let to_world = move |p: Vec2| Vec2::new(p.x - half_w, half_h - p.y);
+    // A card quad is in the virtual window the atlas stands for: one px a texel, from `CARD_ORIGIN`.
+    let (half_w, half_h, origin, scale) = if CARDS {
+        let half = crate::card_lane::ATLAS_SIZE as f32 * 0.5;
+        (half, half, crate::card_lane::CARD_ORIGIN, 1.0)
+    } else {
+        (
+            window.width() * 0.5,
+            window.height() * 0.5,
+            Vec2::ZERO,
+            window.scale_factor(),
+        )
+    };
+    let to_world = move |p: Vec2| Vec2::new(p.x - origin.x - half_w, half_h - (p.y - origin.y));
 
     // Stable, so equal keys keep producer order, the base lane before the append lane.
-    let mut sorted: Vec<&UiQuad> = q.quads.iter().chain(q.overlays.iter()).collect();
+    let mut sorted: Vec<&UiQuad> = q
+        .quads
+        .iter()
+        .chain(q.overlays.iter())
+        .filter(|q| q.card.is_some() == CARDS)
+        .collect();
     sorted.sort_by_key(|q| q.z_key);
+    // The card view rebuilds only when a card's quads changed, which is when the atlas redraws.
+    if let Some(lane) = lane.as_deref_mut().filter(|_| CARDS) {
+        if !lane.gather(&sorted) {
+            return;
+        }
+    }
     let n_sorted = sorted.len();
     let us_sort = lap();
 
     // `WOW_UI_PROBE=1`: every quad's screen rect on each rebuild; the last block is current.
-    if *UI_PROBE {
+    if *UI_PROBE && !CARDS {
         {
             info!(
                 "ui probe: window {}x{} logical",
@@ -969,7 +1019,6 @@ fn rebuild_ui_mesh(
             continue;
         }
         let z = -450.0 + (i as f32 / run_count) * 900.0;
-        let scale = window.scale_factor();
         let (mask_rect, mask) = match &run.mask {
             Some(m) => (
                 Vec4::new(
@@ -1153,16 +1202,18 @@ fn rebuild_ui_mesh(
                 ));
             }
             None => {
-                let entity = commands
-                    .spawn((
-                        UiQuadBatch,
-                        Mesh2d(mesh_handle),
-                        MeshMaterial2d(material_handle),
-                        MeshTag(tag),
-                        Transform::from_xyz(0.0, 0.0, z),
-                        ui_render_layers(),
-                    ))
-                    .id();
+                let mut batch = commands.spawn((
+                    Mesh2d(mesh_handle),
+                    MeshMaterial2d(material_handle),
+                    MeshTag(tag),
+                    Transform::from_xyz(0.0, 0.0, z),
+                ));
+                if CARDS {
+                    batch.insert(crate::card_lane::card_render_layers());
+                } else {
+                    batch.insert((UiQuadBatch, ui_render_layers()));
+                }
+                let entity = batch.id();
                 pools.entities.push(entity);
             }
         }
@@ -1175,7 +1226,7 @@ fn rebuild_ui_mesh(
     pools.meshes.truncate(used);
     pools.stored.truncate(used);
     pools.offsets.truncate(used);
-    if cost_on {
+    if cost_on && !CARDS {
         let us_write = lap();
         *mesh_cost = UiMeshCost {
             rebuilt: true,
@@ -1191,11 +1242,11 @@ fn rebuild_ui_mesh(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The rebuild in isolation: real resources, no renderer.
-    fn rebuild_app() -> App {
+    pub(crate) fn rebuild_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
@@ -1206,7 +1257,7 @@ mod tests {
             .init_resource::<UiMeshCost>()
             .init_resource::<crate::ui_script::UiCostWanted>()
             .insert_resource(UiWhiteTexture(Handle::default()))
-            .add_systems(Update, rebuild_ui_mesh);
+            .add_systems(Update, rebuild_ui_mesh::<false>);
         app.world_mut().spawn((Window::default(), PrimaryWindow));
         let mut quads = app.world_mut().resource_mut::<UiQuads>();
         quads.quads.push(UiQuad {
@@ -1215,6 +1266,24 @@ mod tests {
         });
         quads.dirty = true;
         app
+    }
+
+    /// A material's flags, the state the card and screen views must agree on.
+    pub(crate) fn material_state(material: &UiQuadMaterial) -> String {
+        format!(
+            "additive {} circular {} desaturate {} premultiplied {} alpha_ref {} gamma_texel {} \
+             mask_rect {:?} uv_clamp {:?} texture {} mask {}",
+            material.additive,
+            material.circular,
+            material.desaturate,
+            material.premultiplied,
+            material.alpha_ref,
+            material.gamma_texel,
+            material.mask_rect,
+            material.uv_clamp,
+            material.texture.is_some(),
+            material.mask.is_some(),
+        )
     }
 
     /// The WorldFrame's region mirrored ÷G44/÷G48 (`0x483970`) is the viewport, inclusive. The

@@ -398,6 +398,96 @@ fn the_bubble_text_carries_the_world_seat() {
     )));
 }
 
+/// The card lane seats a bubble far outside the window, so extraction must not cull by the
+/// window's rectangle: every bubble quad of a bubble seated at (5000, -400) on a 1024×768 screen
+/// is still in the render list, with its rect.
+#[test]
+fn extraction_keeps_a_bubble_seated_outside_the_window() {
+    let mut s = vm();
+    let mut off = say(7, 1, "Well met!");
+    off.seat = (5000.0, -400.0);
+    drive(&mut s, &[off]);
+    let quads = s.extract();
+    let drawn: Vec<_> = quads
+        .iter()
+        .filter(|q| {
+            matches!(
+                q.content,
+                QuadContent::Texture { .. } | QuadContent::Text { .. }
+            )
+        })
+        .collect();
+    assert!(
+        drawn.len() >= 10,
+        "the eleven regions draw, got {}",
+        drawn.len()
+    );
+    for q in drawn {
+        let r = q.rect.expect("a bubble region resolves outside the window");
+        assert!(
+            r.left > 4000.0 && r.top < 0.0,
+            "{r:?} is where it was seated"
+        );
+    }
+}
+
+/// Flat play tags nothing; with cards on, every quad of a speaker's bubble carries the speaker, a
+/// frame an addon parents to the bubble included, and the rest of the interface stays untagged.
+#[test]
+fn cards_tag_the_bubble_subtree_by_speaker() {
+    let mut s = vm();
+    s.run(
+        r#"Other = CreateFrame("Frame", nil, WorldFrame) Other:SetAllPoints()
+             Other.t = Other:CreateTexture() Other.t:SetAllPoints() Other.t:SetTexture(1, 1, 1)"#,
+    )
+    .unwrap();
+    drive(&mut s, &[say(7, 1, "Well met!"), say(9, 1, "Hello")]);
+    assert!(s.extract().iter().all(|q| q.card.is_none()), "flat play");
+
+    s.set_chat_bubble_cards(true);
+    s.run(
+        r#"local b = WorldFrame:GetChildren()
+           Skin = CreateFrame("Frame", nil, b) Skin:SetAllPoints(b)
+           Skin.t = Skin:CreateTexture() Skin.t:SetAllPoints() Skin.t:SetTexture(1, 0, 0)"#,
+    )
+    .unwrap();
+    s.resolve();
+    let quads = s.extract();
+    let by = |key: u64| quads.iter().filter(|q| q.card == Some(key)).count();
+    assert!(by(7) >= 11 && by(9) >= 11, "{} and {}", by(7), by(9));
+    assert!(
+        quads
+            .iter()
+            .any(|q| q.card.is_some() && matches!(q.content, QuadContent::Texture { .. })),
+        "textures are tagged"
+    );
+    let untagged = quads.iter().filter(|q| q.card.is_none()).count();
+    assert!(
+        untagged >= 1,
+        "the WorldFrame's own frames stay on the screen"
+    );
+}
+
+/// With cards on the frame still carries the fade (`GetAlpha` reads it) but its quads are drawn
+/// at alpha 1, so they do not change and the card is not drawn again; the fade is the app's to
+/// carry.
+#[test]
+fn a_card_fade_leaves_the_extracted_quads_alone() {
+    let mut s = vm();
+    s.set_chat_bubble_cards(true);
+    drive(&mut s, &[say(7, 1, "Well met!")]);
+    let before = s.extract();
+    let mut fading = say(7, 1, "Well met!");
+    fading.alpha = 0.25;
+    drive(&mut s, &[fading]);
+    assert_eq!(s.extract(), before);
+    assert_eq!(
+        s.eval::<f32>("return (WorldFrame:GetChildren()):GetAlpha()")
+            .unwrap(),
+        0.25
+    );
+}
+
 /// A window resize re-sizes a live bubble in place: the backdrop's unit, the tail, the margin and
 /// the width floor follow, and its eleven regions stay the same objects.
 #[test]
