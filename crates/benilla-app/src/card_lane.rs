@@ -310,6 +310,8 @@ pub(crate) fn run_camera(
 
 #[cfg(test)]
 mod gpu_tests;
+#[cfg(test)]
+mod view_tests;
 
 #[cfg(test)]
 mod tests {

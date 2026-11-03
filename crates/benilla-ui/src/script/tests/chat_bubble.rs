@@ -468,8 +468,9 @@ fn cards_tag_the_bubble_subtree_by_speaker() {
     );
 }
 
-/// With cards on the frame keeps alpha 1 through a fade, so the quads do not change and the card
-/// is not drawn again; the fade is the app's to carry. Flat play writes the fade to the frame.
+/// With cards on the frame still carries the fade (`GetAlpha` reads it) but its quads are drawn
+/// at alpha 1, so they do not change and the card is not drawn again; the fade is the app's to
+/// carry.
 #[test]
 fn a_card_fade_leaves_the_extracted_quads_alone() {
     let mut s = vm();
@@ -483,7 +484,7 @@ fn a_card_fade_leaves_the_extracted_quads_alone() {
     assert_eq!(
         s.eval::<f32>("return (WorldFrame:GetChildren()):GetAlpha()")
             .unwrap(),
-        1.0
+        0.25
     );
 }
 

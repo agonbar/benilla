@@ -220,15 +220,19 @@ fn place_cards(
                 if *transform != place.transform {
                     *transform = place.transform;
                 }
-                // Read before writing, so a card at rest raises no asset change.
+                // Read before writing, so a card at rest raises no asset change. The atlas handle
+                // is part of it: a session restart drops the atlas and the lane makes a new one.
                 let fresh = material(atlas, &place, card.alpha);
                 let same = materials.get(&handle.0).is_some_and(|m| {
-                    m.base_color == fresh.base_color && m.uv_transform == fresh.uv_transform
+                    m.base_color == fresh.base_color
+                        && m.uv_transform == fresh.uv_transform
+                        && m.base_color_texture == fresh.base_color_texture
                 });
                 if !same {
                     if let Some(m) = materials.get_mut(&handle.0) {
                         m.base_color = fresh.base_color;
                         m.uv_transform = fresh.uv_transform;
+                        m.base_color_texture = fresh.base_color_texture;
                     }
                 }
             }
@@ -599,6 +603,30 @@ mod tests {
                 );
                 assert_eq!(quads(&mut app)[0].2, want, "{person:?}");
             }
+        }
+
+        /// The headset idles and the session restarts: the lane drops its atlas and builds a new
+        /// one, and a speaker who kept talking keeps a card drawn from the new atlas.
+        #[test]
+        fn a_card_survives_a_session_restart_on_the_new_atlas() {
+            let mut app = app(Person::Third);
+            show(&mut app, vec![card()]);
+            let first = app.world().resource::<CardLane>().atlas().cloned().unwrap();
+            app.world_mut().resource_mut::<CardLane>().enabled = false;
+            app.update();
+            assert!(app.world().resource::<CardLane>().atlas().is_none());
+            app.world_mut().resource_mut::<CardLane>().enabled = true;
+            app.update();
+            let second = app.world().resource::<CardLane>().atlas().cloned().unwrap();
+            assert_ne!(second, first, "a new atlas image");
+            show(&mut app, vec![card()]);
+            let quad = quads(&mut app).remove(0);
+            let m = app
+                .world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&quad.3)
+                .unwrap();
+            assert_eq!(m.base_color_texture.as_ref(), Some(&second));
         }
 
         /// With no atlas yet, no head or no drawn card, nothing is spawned.
