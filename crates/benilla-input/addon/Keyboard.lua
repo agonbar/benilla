@@ -3,6 +3,8 @@
 -- physical keyboard makes, so it reaches the focused EditBox. Written against the 1.12 API.
 -- Shown by hand: a long press of the pad's view button, the button by the chat frame, or the
 -- TOGGLEPADKEYBOARD binding.
+-- The glue screens have GlueParent where the world has UIParent; the pad loads this file there too.
+local UIParent = UIParent or GlueParent
 BINDING_NAME_TOGGLEPADKEYBOARD = "Toggle Pad Keyboard"
 
 local KEY = 46
