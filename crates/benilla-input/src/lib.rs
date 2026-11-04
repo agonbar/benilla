@@ -829,7 +829,7 @@ fn drive_cursor(
             }
             Act::Close => {
                 // On a glue screen B hides the keyboard first, then is the screen's own Escape,
-                // which backs out of character create and realm list.
+                // which backs out of character create.
                 if rt.glue {
                     if let Some(script) = script.as_ref().filter(|s| keyboard_shown(s)) {
                         // The box gives up focus with it, or its own Escape would take the next B.
@@ -841,6 +841,19 @@ fn drive_cursor(
                         };
                         if let Err(e) = script.run(&chunk) {
                             warn!("pad: keyboard: {e}");
+                        }
+                        continue;
+                    }
+                    // Login has no back, and Escape there is the stock screen's exit (`QuitGame`):
+                    // B is only the realm list's own Cancel when that is up, else nothing.
+                    if let Some(script) = script
+                        .as_ref()
+                        .filter(|s| s.glue_screen().eq_ignore_ascii_case("login"))
+                    {
+                        if script.frame_visible("RealmListCancelButton") {
+                            if let Err(e) = script.run("RealmListCancelButton:Click()") {
+                                warn!("pad: realm list cancel: {e}");
+                            }
                         }
                         continue;
                     }

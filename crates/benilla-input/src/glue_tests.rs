@@ -398,6 +398,63 @@ fn the_d_pad_walks_the_realm_list_and_a_clicks_a_realm_or_cancel() {
     assert_eq!(clicks(&app).len(), 2);
 }
 
+/// Stock login: Escape on the screen or in either box is `AccountLogin_Exit`, which quits.
+const LOGIN_QUITS_ON_ESCAPE: &str = r#"
+    SetCurrentScreen("login")
+    Quits = 0
+    local ui = CreateFrame("Frame", "AccountLoginUI", GlueParent)
+    ui:SetAllPoints()
+    ui:EnableKeyboard(true)
+    ui:SetScript("OnKeyDown", function()
+        if arg1 == "ESCAPE" then Quits = Quits + 1 end
+    end)
+    for _, n in { "AccountLoginAccountEdit", "AccountLoginPasswordEdit" } do
+        local e = Edit(n, ui, 512, n == "AccountLoginAccountEdit" and 420 or 360)
+        e:SetScript("OnEscapePressed", function() Quits = Quits + 1 end)
+    end
+    Button("AccountLoginLoginButton", ui, 512, 280, 200, 40)
+"#;
+
+#[test]
+fn b_on_the_login_screen_does_not_quit() {
+    let _seam = pointer_seam();
+    let mut app = glue_app(LOGIN_QUITS_ON_ESCAPE);
+    app.update();
+    let quits = |app: &App| script(app).eval::<i32>("return Quits").unwrap();
+
+    tap(&mut app, "PAD2");
+    assert_eq!(quits(&app), 0, "login has no back");
+
+    // With a box focused and the keyboard up, B puts the keyboard away and the next B is nothing.
+    walk_to(&mut app, "AccountLoginAccountEdit");
+    tap(&mut app, "PAD1");
+    assert!(shown(&app, "BenillaPadKeyboard"));
+    tap(&mut app, "PAD2");
+    assert!(!shown(&app, "BenillaPadKeyboard"));
+    tap(&mut app, "PAD2");
+    assert_eq!(quits(&app), 0);
+    assert_eq!(mode(&app), Mode::Cursor);
+}
+
+/// The realm list stands over login, which keeps its screen name; its Cancel is B's back.
+#[test]
+fn b_on_the_realm_list_over_login_is_its_cancel() {
+    let _seam = pointer_seam();
+    let mut app = glue_app(&format!(
+        "{LOGIN_QUITS_ON_ESCAPE}\n{}",
+        REALM_LIST.replace("RealmListUI", "RealmListDialog")
+    ));
+    app.update();
+    tap(&mut app, "PAD2");
+    assert_eq!(clicks(&app), ["RealmListCancelButton"]);
+    assert_eq!(script(&app).eval::<i32>("return Quits").unwrap(), 0);
+    // Cancelled and hidden, B is the login screen's again: nothing.
+    script(&app).run("RealmListDialog:Hide()").unwrap();
+    tap(&mut app, "PAD2");
+    assert_eq!(clicks(&app), ["RealmListCancelButton"]);
+    assert_eq!(script(&app).eval::<i32>("return Quits").unwrap(), 0);
+}
+
 /// The world's VM replaces the glue one: cursor mode goes with it and the pad plays again.
 #[test]
 fn leaving_the_glue_screens_gives_the_pad_back_to_gameplay() {
