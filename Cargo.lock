@@ -612,6 +612,7 @@ dependencies = [
  "benilla-formats",
  "benilla-ui",
  "bevy",
+ "gilrs",
  "serde",
  "toml",
 ]
