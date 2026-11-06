@@ -50,6 +50,23 @@ pub fn press(token: &str, pointing: bool) -> Option<Act> {
     })
 }
 
+/// `act` on a glue screen. The stock glue buttons register for left clicks only, so there A is a
+/// left click too.
+pub fn on_glue(act: Act) -> Act {
+    match act {
+        Act::Button {
+            button: MouseButton::Right,
+            shift,
+            down,
+        } => Act::Button {
+            button: MouseButton::Left,
+            shift,
+            down,
+        },
+        other => other,
+    }
+}
+
 /// The act that undoes a [`press`], for the button's release.
 pub fn release(act: Act) -> Option<Act> {
     match act {
@@ -111,6 +128,23 @@ mod tests {
             None,
             "the stick click still jumps"
         );
+    }
+
+    #[test]
+    fn on_a_glue_screen_a_is_a_left_click_and_nothing_else_changes() {
+        let a = on_glue(press("PAD1", false).unwrap());
+        assert_eq!(
+            a,
+            Act::Button {
+                button: MouseButton::Left,
+                shift: false,
+                down: true
+            }
+        );
+        assert_eq!(on_glue(Act::Close), Act::Close);
+        assert_eq!(on_glue(Act::Snap(SnapDir::Up)), Act::Snap(SnapDir::Up));
+        let x = press("PAD4", false).unwrap();
+        assert_eq!(on_glue(x), x);
     }
 
     #[test]
