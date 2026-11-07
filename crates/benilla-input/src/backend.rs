@@ -461,6 +461,59 @@ mod tests {
         assert_eq!(rig.device.active(), Some(Rig::entity(STEAM_XBOX)));
     }
 
+    /// At startup gilrs may list the raw pad before Steam's: in one frame it is shown and hidden
+    /// again, each as a raw and a `GamepadConnectionEvent`, as [`announce`] writes them.
+    /// `read_pad` reads connects from the latter first, and the raw pad still stays out.
+    #[test]
+    fn a_raw_pad_listed_before_steams_at_startup_stays_out() {
+        let mut app = App::new();
+        app.add_message::<RawGamepadEvent>()
+            .add_message::<GamepadConnectionEvent>()
+            .insert_resource(PadDevice::new(PadConfig::default()))
+            .init_resource::<crate::device::PadState>()
+            .insert_resource(crate::Trace(false))
+            .insert_resource(Time::<bevy::time::Real>::default())
+            .add_systems(PreUpdate, crate::read_pad);
+        let mut selection = Selection::new(&PadConfig::default());
+        let pads = [
+            (XBOX, "Xbox Wireless Controller", 0x045e, 0x0b13),
+            (STEAM_XBOX, "Microsoft X-Box 360 pad 1", 0x28de, 0x11ff),
+        ];
+        for (id, name, vendor, product) in pads {
+            let info = PadInfo {
+                name: name.into(),
+                vendor: Some(vendor),
+                product: Some(product),
+            };
+            for (k, shown) in selection.update(id, Some(info.clone())) {
+                let connection = if shown {
+                    let i = &selection.pads[&k];
+                    GamepadConnection::Connected {
+                        name: i.name.clone(),
+                        vendor_id: i.vendor,
+                        product_id: i.product,
+                    }
+                } else {
+                    GamepadConnection::Disconnected
+                };
+                let event = GamepadConnectionEvent::new(Rig::entity(k), connection);
+                app.world_mut()
+                    .write_message(RawGamepadEvent::from(event.clone()));
+                app.world_mut().write_message(event);
+            }
+        }
+        app.update();
+        let press = |app: &mut App, id| {
+            app.world_mut().write_message(RawGamepadEvent::Button(
+                RawGamepadButtonChangedEvent::new(Rig::entity(id), GamepadButton::South, 1.0),
+            ));
+            app.update();
+            app.world().resource::<PadDevice>().active()
+        };
+        assert_eq!(press(&mut app, XBOX), None, "the raw pad is out");
+        assert_eq!(press(&mut app, STEAM_XBOX), Some(Rig::entity(STEAM_XBOX)));
+    }
+
     #[test]
     fn a_pinned_device_wins_over_steam_input() {
         let (cfg, _) = PadConfig::parse("device = \"045e:0b13\"");
