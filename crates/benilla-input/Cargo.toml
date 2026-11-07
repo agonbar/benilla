@@ -18,6 +18,8 @@ dev = ["benilla-app/dev"]
 benilla-app = { path = "../benilla-app", default-features = false }
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
+# Built by `backend` with force feedback off unless `pad.toml` asks; the version bevy_gilrs takes.
+gilrs = "0.11"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
