@@ -270,6 +270,8 @@ pub fn stick_directions(raw: Vec2, dead_zone: f32, was: impl Fn(usize) -> bool) 
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use bevy::input::gamepad::{
         GamepadConnectionEvent, RawGamepadAxisChangedEvent, RawGamepadButtonChangedEvent,
     };
@@ -520,5 +522,98 @@ mod tests {
         assert_eq!(c.len(), 1);
         assert_eq!((c[0].vendor, c[0].product), (Some(0x28de), Some(0x1205)));
         assert!(d.take_connects().is_empty());
+    }
+
+    /// The Deck through Steam Input: the virtual `X-Box 360 pad 0` (the Deck), `pad 1` (the Xbox
+    /// pad) and a third virtual pad, all vendor `28de`, which come and go while Steam restarts its
+    /// virtual pads. The raw `Xbox Wireless Controller` is not one of them: the backend hides it
+    /// while a Steam pad is connected. One physical press is written by every pad that mirrors
+    /// it, and must reach `PadState` once: one down edge, one up edge, whoever is active.
+    #[test]
+    fn three_pads_and_their_churn_leave_one_active_pad_and_one_edge_per_press() {
+        let mut d = device();
+        let (deck, xbox, extra) = (pad(1), pad(2), pad(3));
+        let (downs, ups, was) = (Cell::new(0), Cell::new(0), Cell::new(false));
+        // Every event goes through here, so no edge between two of them goes uncounted.
+        let observe = |d: &PadDevice| {
+            let now = d.state().is_down("PAD1");
+            downs.set(downs.get() + usize::from(now && !was.get()));
+            ups.set(ups.get() + usize::from(!now && was.get()));
+            was.set(now);
+        };
+        let press = |d: &mut PadDevice, e: Entity, v: f32, t: f32| {
+            button(d, e, GamepadButton::South, v, t);
+            observe(d);
+        };
+        let disconnect = |d: &mut PadDevice, e: Entity, t: f32| {
+            d.handle(
+                &RawGamepadEvent::Connection(GamepadConnectionEvent::new(
+                    e,
+                    GamepadConnection::Disconnected,
+                )),
+                t,
+            );
+        };
+        connect(&mut d, deck, 0x28de, 0x11ff);
+        connect(&mut d, xbox, 0x28de, 0x11ff);
+        connect(&mut d, extra, 0x28de, 0x11ff);
+
+        // A press on the Xbox pad, mirrored by the other two a moment later each way.
+        press(&mut d, xbox, 1.0, 1.0);
+        press(&mut d, deck, 1.0, 1.001);
+        press(&mut d, extra, 1.0, 1.002);
+        assert_eq!((downs.get(), d.active()), (1, Some(xbox)));
+        press(&mut d, xbox, 0.0, 1.1);
+        press(&mut d, deck, 0.0, 1.101);
+        press(&mut d, extra, 0.0, 1.102);
+        assert_eq!(
+            (downs.get(), ups.get()),
+            (1, 1),
+            "one press, one pair of edges"
+        );
+
+        // The third pad vanishes and returns as a new entity, mid-play, and mirrors a press again.
+        disconnect(&mut d, extra, 2.0);
+        let extra = pad(4);
+        connect(&mut d, extra, 0x28de, 0x11ff);
+        press(&mut d, xbox, 1.0, 3.0);
+        press(&mut d, extra, 1.0, 3.001);
+        press(&mut d, deck, 1.0, 3.002);
+        press(&mut d, xbox, 0.0, 3.1);
+        press(&mut d, extra, 0.0, 3.101);
+        press(&mut d, deck, 0.0, 3.102);
+        assert_eq!((downs.get(), ups.get(), d.active()), (2, 2, Some(xbox)));
+
+        // The active pad goes: what it held is released, and its dying node's events are nothing.
+        press(&mut d, xbox, 1.0, 4.0);
+        disconnect(&mut d, xbox, 4.1);
+        observe(&d);
+        assert_eq!(
+            (downs.get(), ups.get()),
+            (3, 3),
+            "the disconnect released the press"
+        );
+        press(&mut d, xbox, 0.0, 4.101);
+        assert_eq!((downs.get(), ups.get(), d.active()), (3, 3, None));
+        // The mirrors still hold the button the player has not let go of: their release is not a
+        // press, and neither is the pad that returns.
+        press(&mut d, deck, 0.0, 4.2);
+        press(&mut d, extra, 0.0, 4.201);
+        assert_eq!((downs.get(), ups.get(), d.active()), (3, 3, None));
+        let xbox = pad(5);
+        connect(&mut d, xbox, 0x28de, 0x11ff);
+        assert_eq!(d.active(), None, "a connection is not input");
+
+        // The next press takes over once, whichever pad it comes from first, and its mirrors are
+        // ignored.
+        press(&mut d, extra, 1.0, 5.0);
+        press(&mut d, deck, 1.0, 5.001);
+        press(&mut d, xbox, 1.0, 5.002);
+        assert_eq!((downs.get(), d.active()), (4, Some(extra)));
+        press(&mut d, extra, 0.0, 5.1);
+        press(&mut d, deck, 0.0, 5.101);
+        press(&mut d, xbox, 0.0, 5.102);
+        assert_eq!((downs.get(), ups.get()), (4, 4));
+        assert!(d.connected() && *d.state() == PadState::default());
     }
 }

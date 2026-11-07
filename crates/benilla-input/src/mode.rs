@@ -7,6 +7,8 @@
 //! window-driven mode has nothing left to show, when `PADBACK` is pressed again, or when the left
 //! stick walks (with the right stick as the cursor, which is the default).
 //!
+//! A glue screen holds cursor mode for as long as it is up.
+//!
 //! Entering is by edge, not by level: a window opening switches in, but one left open after the
 //! player walked away does not pull the pad back every poll.
 
@@ -30,6 +32,8 @@ pub struct Signals<'a> {
     pub back: bool,
     /// The left stick is out of its dead zone, and is the stick that walks.
     pub walk: bool,
+    /// A glue screen is up (login, realms, characters): there is no gameplay to go back to.
+    pub glue: bool,
     /// A laser points at the UI panel.
     pub pointing: bool,
 }
@@ -58,7 +62,10 @@ impl Machine {
         // The left stick walks in cursor mode too, bound as it is; a laser on the panel keeps the
         // mode, because walking with a hand up is not a wish to look away.
         let walk = s.walk && !s.pointing;
-        if s.back {
+        if s.glue {
+            self.mode = Mode::Cursor;
+            self.manual = false;
+        } else if s.back {
             self.mode = match self.mode {
                 Mode::Gameplay => Mode::Cursor,
                 Mode::Cursor => Mode::Gameplay,
@@ -93,6 +100,7 @@ mod tests {
             targeting,
             back,
             walk,
+            glue: false,
             pointing: false,
         })
     }
@@ -209,8 +217,34 @@ mod tests {
             targeting: false,
             back: false,
             walk,
+            glue: false,
             pointing,
         })
+    }
+
+    #[test]
+    fn a_glue_screen_holds_cursor_mode_against_padback_and_a_walk_and_gameplay_follows_it() {
+        let mut m = Machine::default();
+        let glue = |m: &mut Machine, back, walk| {
+            m.step(Signals {
+                panels: &panels(&[]),
+                targeting: false,
+                back,
+                walk,
+                glue: true,
+                pointing: false,
+            })
+        };
+        assert_eq!(glue(&mut m, false, false), Mode::Cursor);
+        assert_eq!(
+            glue(&mut m, true, false),
+            Mode::Cursor,
+            "PADBACK is no way out"
+        );
+        assert_eq!(glue(&mut m, false, true), Mode::Cursor, "nor is a walk");
+        assert_eq!(glue(&mut m, false, false), Mode::Cursor);
+        // The world replaces the glue VM: nothing holds the mode, and it does not stay manual.
+        assert_eq!(step(&mut m, &[], false, false, false), Mode::Gameplay);
     }
 
     #[test]

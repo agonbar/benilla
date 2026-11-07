@@ -25,6 +25,8 @@ mod backend;
 mod config;
 mod cursor;
 mod device;
+#[cfg(test)]
+mod glue_tests;
 mod glyphs;
 mod hold;
 mod host;
@@ -51,7 +53,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
 use benilla_app::{AppExit, BindingKeyInput, BuildId, CoverUp, SoftTargetInput, SoftTargetReady};
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{UiScript, VmKind};
 
 use actions::Act;
 use config::CursorStick;
@@ -194,6 +196,7 @@ impl Plugin for PadPlugin {
                     take_asks,
                     drive_cursor,
                     drive_text,
+                    drive_glue_keyboard,
                     drive_look.in_set(PadSystems::Look),
                     push_state,
                 )
@@ -220,6 +223,12 @@ struct Runtime {
     reading: panels::Reading,
     /// FrameXML's UI is loaded, so there is a world to play in.
     world: bool,
+    /// The VM is GlueXML's: login, realm list, characters. The pad holds cursor mode there.
+    glue: bool,
+    /// The EditBox that had focus at the last poll, for the glue keyboard.
+    glue_focus: Option<String>,
+    /// The frame a pad click ended on, and frames left to wait for the focus it may have given.
+    glue_click: Option<(String, u8)>,
     poll: f32,
     auto: presentation::Auto,
     /// A real mouse moved or clicked since the last frame.
@@ -322,7 +331,14 @@ fn read_world(
 ) {
     rt.poll += time.delta_secs();
     if let Some(script) = script {
-        if rt.poll >= panels::POLL {
+        rt.glue = script.vm_kind() == VmKind::Glue;
+        if rt.glue {
+            // GlueXML has no `UIPanelWindows`; no world, no windows, only the screen.
+            rt.world = false;
+            if rt.reading != panels::Reading::default() {
+                rt.reading = panels::Reading::default();
+            }
+        } else if rt.poll >= panels::POLL {
             rt.poll = 0.0;
             match panels::read(&script) {
                 Some(r) => {
@@ -336,6 +352,7 @@ fn read_world(
         }
     } else {
         rt.world = false;
+        rt.glue = false;
     }
 
     // Their own are the ones the pad wrote last frame, which come back through these readers.
@@ -382,6 +399,7 @@ fn step_mode(
         back: back == hold::Back::Tap,
         // Pushing the stick again is a walk; a stick already held when a window opened is not.
         walk: left && !rt.left_was && cfg.cursor_stick == CursorStick::Right,
+        glue: rt.glue,
         pointing: laser.on_panel,
     };
     let before = rt.machine.mode();
@@ -560,7 +578,13 @@ fn route_keys(
             rt.tap.down(token);
         }
         if cursor_mode && actions::consumed(token, left_is_cursor, laser.pointing()) {
-            let act = actions::press(token, laser.pointing());
+            let act = actions::press(token, laser.pointing()).map(|a| {
+                if rt.glue {
+                    actions::on_glue(a)
+                } else {
+                    a
+                }
+            });
             rt.acts.extend(act);
             rt.routed.insert(token, Routed::Cursor(act));
             if trace.0 {
@@ -712,9 +736,17 @@ fn drive_cursor(
                         input.os.unwrap_or(size / 2.0)
                     };
                     let at = benilla_app::pointer::window_to_ui(size.y, from);
-                    let to = script
-                        .as_ref()
-                        .and_then(|s| s.snap_target((at.x, at.y), *dir));
+                    let to = script.as_ref().and_then(|s| {
+                        let to = s.snap_target((at.x, at.y), *dir);
+                        // The first press of a pad that has not placed its cursor yet lands on the
+                        // nearest widget, whatever the direction: the glue screens start with the
+                        // cursor mid-screen, where a direction can point at nothing.
+                        to.or_else(|| {
+                            (rt.glue && rt.cursor.owner != cursor::Owner::Pad)
+                                .then(|| snap_any(s, (at.x, at.y)))
+                                .flatten()
+                        })
+                    });
                     if let Some((x, y)) = to {
                         input.snap =
                             Some(benilla_app::pointer::ui_to_window(size.y, Vec2::new(x, y)));
@@ -725,6 +757,14 @@ fn drive_cursor(
                 }
                 // A click at the laser is not the pad taking the cursor.
                 Act::Button { down: true, .. } if !laser.pointing() => input.pad_action = true,
+                // A click that ends on an EditBox may focus it, and then the glue keyboard shows.
+                Act::Button { down: false, .. } if rt.glue => {
+                    let at = benilla_app::pointer::window_to_ui(size.y, rt.cursor.pos);
+                    rt.glue_click = script.as_ref().and_then(|s| {
+                        let hit = s.hit_test_frame(at.x, at.y)?;
+                        Some((s.frame_name(hit)?, 2))
+                    });
+                }
                 _ => {}
             }
         }
@@ -804,9 +844,38 @@ fn drive_cursor(
                 });
             }
             Act::Close => {
+                // On a glue screen B hides the keyboard first, then is the screen's own Escape,
+                // which backs out of character create.
+                if rt.glue {
+                    if let Some(script) = script.as_ref().filter(|s| keyboard_shown(s)) {
+                        // The box gives up focus with it, or its own Escape would take the next B.
+                        let chunk = match script.focused_editbox_name() {
+                            Some(name) => format!(
+                                "BenillaPadKeyboard:Hide() getglobal(\"{name}\"):ClearFocus()"
+                            ),
+                            None => "BenillaPadKeyboard:Hide()".to_owned(),
+                        };
+                        if let Err(e) = script.run(&chunk) {
+                            warn!("pad: keyboard: {e}");
+                        }
+                        continue;
+                    }
+                    // Login has no back, and Escape there is the stock screen's exit (`QuitGame`):
+                    // B is only the realm list's own Cancel when that is up, else nothing.
+                    if let Some(script) = script
+                        .as_ref()
+                        .filter(|s| s.glue_screen().eq_ignore_ascii_case("login"))
+                    {
+                        if script.frame_visible("RealmListCancelButton") {
+                            if let Err(e) = script.run("RealmListCancelButton:Click()") {
+                                warn!("pad: realm list cancel: {e}");
+                            }
+                        }
+                        continue;
+                    }
                 // Escape closes the windows and cancels a targeting cursor; with neither it would
                 // open the game menu, which is not a close.
-                if rt.reading.panels.is_empty() && !rt.reading.targeting {
+                } else if rt.reading.panels.is_empty() && !rt.reading.targeting {
                     continue;
                 }
                 for state in [ButtonState::Pressed, ButtonState::Released] {
@@ -824,6 +893,24 @@ fn drive_cursor(
             Act::Snap(_) => {}
         }
     }
+}
+
+/// The nearest clickable widget from `at` in any direction (UI units, y up).
+fn snap_any(script: &UiScript, at: (f32, f32)) -> Option<(f32, f32)> {
+    use benilla_ui::script::snap::SnapDir::{Down, Left, Right, Up};
+    let dist = |p: &(f32, f32)| (p.0 - at.0).hypot(p.1 - at.1);
+    [Up, Down, Left, Right]
+        .into_iter()
+        .filter_map(|d| script.snap_target(at, d))
+        .min_by(|a, b| dist(a).total_cmp(&dist(b)))
+}
+
+fn keyboard_shown(script: &UiScript) -> bool {
+    script
+        .eval::<bool>(
+            "return BenillaPadKeyboard and BenillaPadKeyboard:IsShown() and true or false",
+        )
+        .unwrap_or(false)
 }
 
 fn hide_os_cursor(rt: &mut Runtime, opts: &mut CursorOptions) {
@@ -875,6 +962,55 @@ fn drive_text(
             keys.write(event);
         }
     }
+}
+
+/// The keyboard on the glue screens follows the EditBox: it shows when a box takes focus, and when
+/// a pad click lands on the focused box again after the keyboard was put away; it goes when the
+/// focus leaves, so a screen change does not leave it over the next one. Only for the controller
+/// presentation, so a player on a real keyboard is not covered.
+fn drive_glue_keyboard(
+    cfg: Res<PadConfig>,
+    device: Res<PadDevice>,
+    trace: Res<Trace>,
+    script: Option<NonSend<UiScript>>,
+    mut rt: ResMut<Runtime>,
+) {
+    let rt = &mut *rt;
+    let Some(script) = script.filter(|_| rt.glue) else {
+        rt.glue_focus = None;
+        rt.glue_click = None;
+        return;
+    };
+    let focus = script.focused_editbox_name();
+    let clicked = match rt.glue_click.take() {
+        Some((name, 0 | 1)) => Some(name),
+        Some((name, n)) => {
+            rt.glue_click = Some((name, n - 1));
+            None
+        }
+        None => None,
+    };
+    let shown = keyboard_shown(&script);
+    let controller =
+        rt.auto.resolve(cfg.presentation, device.connected()) == presentation::Look::Controller;
+    let wants = controller
+        && focus.is_some()
+        && (focus != rt.glue_focus || clicked.is_some_and(|c| Some(&c) == focus.as_ref()));
+    let call = if wants && !shown {
+        Some("BenillaPadShowKeyboard()")
+    } else if focus.is_none() && shown && rt.glue_focus.is_some() {
+        Some("BenillaPadKeyboard:Hide()")
+    } else {
+        None
+    };
+    if let Some(call) = call {
+        match script.run(call) {
+            Ok(()) if trace.0 => info!("pad: glue keyboard: {call}"),
+            Ok(()) => {}
+            Err(e) => warn!("pad: {call}: {e}"),
+        }
+    }
+    rt.glue_focus = focus;
 }
 
 /// Whether the pad holds a mouselook session: in gameplay mode with a pad to play it. With no pad
@@ -956,6 +1092,13 @@ fn push_state(
                 rt.pushed = Pushed {
                     session: Some(script.session()),
                     ..default()
+                };
+                // The keyboard is the addon's, which the glue VM does not load: GlueXML runs off
+                // its own toc. Its source goes in with the session.
+                if rt.glue {
+                    if let Err(e) = script.run(addon::KEYBOARD) {
+                        warn!("pad: glue keyboard: {e}");
+                    }
                 }
             }
             Err(e) => {
@@ -998,7 +1141,7 @@ mod tests {
     use bevy::input::mouse::MouseButton;
 
     /// The systems that read a frame's input and route the pad's, with no gilrs and no UI.
-    fn app() -> App {
+    pub(crate) fn app() -> App {
         let mut app = App::new();
         app.add_message::<BindingKeyInput>()
             .add_message::<MouseMotion>()
@@ -1023,7 +1166,7 @@ mod tests {
         app
     }
 
-    fn hold(app: &mut App, down: &[&'static str]) {
+    pub(crate) fn hold(app: &mut App, down: &[&'static str]) {
         *app.world_mut().resource_mut::<PadState>() = device::state_with(PadState::default(), down);
     }
 
@@ -1108,6 +1251,7 @@ mod tests {
     /// One scenario, in order: the pad globals the seam holds are shared, so it is one test.
     #[test]
     fn the_same_button_presses_an_action_in_gameplay_and_a_click_in_cursor_mode() {
+        let _seam = crate::glue_tests::pointer_seam();
         let mut app = app();
         // The cursor writes the process-wide pointer seam, which no other test may share.
         app.add_systems(Update, drive_cursor.after(route_keys));

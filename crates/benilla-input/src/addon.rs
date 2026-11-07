@@ -9,7 +9,7 @@ pub const NAME: &str = "BenillaPad";
 const TOC: &str = include_str!("../addon/BenillaPad.toc");
 const LUA: &str = include_str!("../addon/BenillaPad.lua");
 const RING: &str = include_str!("../addon/Ring.lua");
-const KEYBOARD: &str = include_str!("../addon/Keyboard.lua");
+pub(crate) const KEYBOARD: &str = include_str!("../addon/Keyboard.lua");
 pub(crate) const BINDINGS: &str = include_str!("../addon/Bindings.xml");
 
 /// Write the addon under `config`, leaving a file alone when it already reads the same.
