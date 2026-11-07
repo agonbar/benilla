@@ -525,13 +525,14 @@ mod tests {
     }
 
     /// The Deck through Steam Input: the virtual `X-Box 360 pad 0` (the Deck), `pad 1` (the Xbox
-    /// pad) and the raw `Xbox Wireless Controller`, which gilrs lists together and which come and
-    /// go while Steam restarts its virtual pads. One physical press is written by every pad that
-    /// mirrors it, and must reach `PadState` once: one down edge, one up edge, whoever is active.
+    /// pad) and a third virtual pad, all vendor `28de`, which come and go while Steam restarts its
+    /// virtual pads. The raw `Xbox Wireless Controller` is not one of them: the backend hides it
+    /// while a Steam pad is connected. One physical press is written by every pad that mirrors
+    /// it, and must reach `PadState` once: one down edge, one up edge, whoever is active.
     #[test]
     fn three_pads_and_their_churn_leave_one_active_pad_and_one_edge_per_press() {
         let mut d = device();
-        let (deck, xbox, raw) = (pad(1), pad(2), pad(3));
+        let (deck, xbox, extra) = (pad(1), pad(2), pad(3));
         let (downs, ups, was) = (Cell::new(0), Cell::new(0), Cell::new(false));
         // Every event goes through here, so no edge between two of them goes uncounted.
         let observe = |d: &PadDevice| {
@@ -554,32 +555,32 @@ mod tests {
             );
         };
         connect(&mut d, deck, 0x28de, 0x11ff);
-        connect(&mut d, xbox, 0x045e, 0x028e);
-        connect(&mut d, raw, 0x045e, 0x0b12);
+        connect(&mut d, xbox, 0x28de, 0x11ff);
+        connect(&mut d, extra, 0x28de, 0x11ff);
 
         // A press on the Xbox pad, mirrored by the other two a moment later each way.
         press(&mut d, xbox, 1.0, 1.0);
         press(&mut d, deck, 1.0, 1.001);
-        press(&mut d, raw, 1.0, 1.002);
+        press(&mut d, extra, 1.0, 1.002);
         assert_eq!((downs.get(), d.active()), (1, Some(xbox)));
         press(&mut d, xbox, 0.0, 1.1);
         press(&mut d, deck, 0.0, 1.101);
-        press(&mut d, raw, 0.0, 1.102);
+        press(&mut d, extra, 0.0, 1.102);
         assert_eq!(
             (downs.get(), ups.get()),
             (1, 1),
             "one press, one pair of edges"
         );
 
-        // The raw node vanishes and returns as a new entity, mid-play, and mirrors a press again.
-        disconnect(&mut d, raw, 2.0);
-        let raw = pad(4);
-        connect(&mut d, raw, 0x045e, 0x0b12);
+        // The third pad vanishes and returns as a new entity, mid-play, and mirrors a press again.
+        disconnect(&mut d, extra, 2.0);
+        let extra = pad(4);
+        connect(&mut d, extra, 0x28de, 0x11ff);
         press(&mut d, xbox, 1.0, 3.0);
-        press(&mut d, raw, 1.0, 3.001);
+        press(&mut d, extra, 1.0, 3.001);
         press(&mut d, deck, 1.0, 3.002);
         press(&mut d, xbox, 0.0, 3.1);
-        press(&mut d, raw, 0.0, 3.101);
+        press(&mut d, extra, 0.0, 3.101);
         press(&mut d, deck, 0.0, 3.102);
         assert_eq!((downs.get(), ups.get(), d.active()), (2, 2, Some(xbox)));
 
@@ -597,19 +598,19 @@ mod tests {
         // The mirrors still hold the button the player has not let go of: their release is not a
         // press, and neither is the pad that returns.
         press(&mut d, deck, 0.0, 4.2);
-        press(&mut d, raw, 0.0, 4.201);
+        press(&mut d, extra, 0.0, 4.201);
         assert_eq!((downs.get(), ups.get(), d.active()), (3, 3, None));
         let xbox = pad(5);
-        connect(&mut d, xbox, 0x045e, 0x028e);
+        connect(&mut d, xbox, 0x28de, 0x11ff);
         assert_eq!(d.active(), None, "a connection is not input");
 
         // The next press takes over once, whichever pad it comes from first, and its mirrors are
         // ignored.
-        press(&mut d, raw, 1.0, 5.0);
+        press(&mut d, extra, 1.0, 5.0);
         press(&mut d, deck, 1.0, 5.001);
         press(&mut d, xbox, 1.0, 5.002);
-        assert_eq!((downs.get(), d.active()), (4, Some(raw)));
-        press(&mut d, raw, 0.0, 5.1);
+        assert_eq!((downs.get(), d.active()), (4, Some(extra)));
+        press(&mut d, extra, 0.0, 5.1);
         press(&mut d, deck, 0.0, 5.101);
         press(&mut d, xbox, 0.0, 5.102);
         assert_eq!((downs.get(), ups.get()), (4, 4));
