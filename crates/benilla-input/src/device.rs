@@ -122,8 +122,11 @@ impl PadDevice {
                         vendor: *vendor_id,
                         product: *product_id,
                     };
-                    self.connects.push(info.clone());
-                    self.pads.insert(c.gamepad, info);
+                    // bevy_gilrs reports a hot-plugged pad twice (see `read_pad`): one pad.
+                    if !self.pads.contains_key(&c.gamepad) {
+                        self.connects.push(info.clone());
+                        self.pads.insert(c.gamepad, info);
+                    }
                 }
                 GamepadConnection::Disconnected => {
                     self.pads.remove(&c.gamepad);
@@ -451,6 +454,19 @@ mod tests {
         // The survivor is active on its next input at once, with no silence to wait out.
         button(&mut d, b, GamepadButton::North, 1.0, 1.2);
         assert_eq!(d.active(), Some(b));
+    }
+
+    /// bevy_gilrs reports a hot-plugged pad twice, as a `GamepadConnectionEvent` and a raw one:
+    /// one connection.
+    #[test]
+    fn a_pad_reported_connected_twice_connects_once() {
+        let mut d = device();
+        let e = pad(1);
+        connect(&mut d, e, 0x28de, 0x11ff);
+        connect(&mut d, e, 0x28de, 0x11ff);
+        assert_eq!(d.take_connects().len(), 1);
+        button(&mut d, e, GamepadButton::South, 1.0, 1.0);
+        assert!(d.state().is_down("PAD1"));
     }
 
     /// A pad whose node vanished and came back is a new gamepad entity: it plays at once, and the
