@@ -3,7 +3,11 @@
 //! written. Retail's `GamePadEmulate*` CVars are `emulate_*` here.
 //!
 //! ```toml
-//! device = "auto"            # or "28de:1205": only that vendor:product is read
+//! device = "auto"            # or "28de:1205": only that vendor:product is read. While a Steam
+//!                            # Input pad (vendor 28de) is connected, auto reads only those,
+//!                            # never the raw pads Steam reads them from
+//! rumble = false             # true lets gilrs drive the pads' force feedback; nothing in benilla
+//!                            # plays rumble yet; off, gilrs plays none on any pad
 //! move_dead_zone = 0.25      # left stick, radial; also where a direction presses
 //! look_dead_zone = 0.15      # right stick, radial
 //! trigger_press = 0.5        # a trigger or button counts as down from here
@@ -90,6 +94,8 @@ pub struct PadConfig {
     pub ui_scale: Option<f32>,
     /// The soft target's dials, handed to `benilla-app` at start.
     pub soft: SoftTargetConfig,
+    /// gilrs drives force feedback ([`crate::backend`]).
+    pub rumble: bool,
 }
 
 impl Default for PadConfig {
@@ -109,6 +115,7 @@ impl Default for PadConfig {
             cursor_speed: 1100.0,
             ui_scale: None,
             soft: SoftTargetConfig::default(),
+            rumble: false,
         }
     }
 }
@@ -134,6 +141,7 @@ struct File {
     soft_arc: Option<f32>,
     soft_margin: Option<f32>,
     soft_switch_ms: Option<f32>,
+    rumble: Option<bool>,
 }
 
 impl PadConfig {
@@ -193,6 +201,9 @@ impl PadConfig {
         );
         if let Some(v) = file.look_invert_y {
             cfg.look_invert_y = v;
+        }
+        if let Some(v) = file.rumble {
+            cfg.rumble = v;
         }
         range(
             "cursor_speed",
@@ -394,6 +405,15 @@ mod tests {
             cfg.soft.switch_secs,
             SoftTargetConfig::default().switch_secs
         );
+    }
+
+    #[test]
+    fn rumble_is_off_unless_turned_on() {
+        assert!(!PadConfig::default().rumble);
+        assert!(PadConfig::parse("rumble = true").0.rumble);
+        let (cfg, problems) = PadConfig::parse("rumble = \"yes\"");
+        assert!(!cfg.rumble);
+        assert_eq!(problems.len(), 1, "{problems:?}");
     }
 
     #[test]

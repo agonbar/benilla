@@ -16,10 +16,12 @@
 //! the keyboard. The pad's own settings are `pad.toml` ([`config`]).
 //!
 //! Gamepad input is off in stock benilla (`benilla-world`'s `boot.rs` disables `GilrsPlugin`);
-//! [`run`] turns it back on from the plugin group's hook, so stock benilla stays as it is.
+//! [`run`] adds gilrs back from the plugin group's hook, built by [`backend`] and not by bevy, so
+//! stock benilla stays as it is.
 
 mod actions;
 mod addon;
+mod backend;
 mod config;
 mod cursor;
 mod device;
@@ -138,7 +140,7 @@ pub fn run(build: BuildId) -> AppExit {
 /// The plugin group hook that turns gilrs on. A launcher that composes more hooks (VR) calls it.
 pub fn enable_gilrs(group: PluginGroupBuilder) -> PluginGroupBuilder {
     hotplug::watch_dev_input_in_container();
-    group.enable::<bevy::gilrs::GilrsPlugin>()
+    group.add(backend::GilrsBackend)
 }
 
 /// Pad input: the device layer, the tokens and default bindings, the modes, the cursor and the
@@ -161,7 +163,11 @@ impl Plugin for PadPlugin {
             }
         }
 
-        let cfg = PadConfig::load();
+        // `pad.toml` as gilrs' backend loaded it, or loaded here when there is no backend.
+        let cfg = app
+            .world_mut()
+            .remove_resource::<PadConfig>()
+            .unwrap_or_else(PadConfig::load);
         app.insert_resource(PadDevice::new(cfg.clone()))
             .insert_resource(cfg.soft)
             .insert_resource(cfg)
@@ -173,9 +179,7 @@ impl Plugin for PadPlugin {
             .init_resource::<RoutedTrace>()
             .init_resource::<Runtime>()
             .init_resource::<Host>()
-            .insert_resource(Trace(
-                std::env::var_os("WOW_PAD_TRACE").is_some_and(|v| v != "0"),
-            ))
+            .insert_resource(Trace(pad_trace()))
             .add_message::<BindingKeyInput>()
             .add_message::<SoftTargetInput>()
             .add_message::<PadRouted>()
@@ -205,6 +209,10 @@ impl Plugin for PadPlugin {
 /// `WOW_PAD_TRACE=1`.
 #[derive(Resource)]
 struct Trace(bool);
+
+fn pad_trace() -> bool {
+    std::env::var_os("WOW_PAD_TRACE").is_some_and(|v| v != "0")
+}
 
 /// What the pad's systems share across a frame: each one's answer is the next one's input.
 #[derive(Resource, Default)]

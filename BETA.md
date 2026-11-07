@@ -143,6 +143,8 @@ ui_scale = "deck"
 
 The other keys are listed in the comment at the top of `crates/benilla-input/src/config.rs`.
 
+While Steam Input runs, benilla reads only Steam's virtual pads (vendor `28de`) and ignores the raw pads behind them, such as an Xbox pad over Bluetooth; `device = "vid:pid"` overrides that. Force feedback is off unless `rumble = true`: gilrs plays none on any pad.
+
 ## 3. Default pad layout
 
 Names follow the Deck as Steam presents it (an Xbox 360 pad): Menu is the right of the two small buttons, View the left. The tokens in the table (`PAD1`, `PADLSTICK`...) are what the Key Bindings window shows, and any binding there can be rebound. Defaults: `crates/benilla-input/src/layers.rs`.
@@ -293,7 +295,7 @@ In this beta:
 - ADR-29 got a partial run (Game Mode, `6b9e42c9`). It passed: the left stick in every direction, the right stick as look, A, B, X, Y and the d-pad on their bar slots, RB targeting the nearest enemy, and Menu opening the game menu. It did not exercise LB, the stick clicks, a bar press under a trigger, or the Key Bindings rows.
 - Part 1 ([ADR-46](/ADR/issues/ADR-46)) fixed a pad that vanishes mid-session by making gilrs watch `/dev/input` instead of udev in a container. It is not yet seen on a Deck. In that mode gilrs may list the raw `Steam Deck` node next to Steam's virtual pad. `grep 'Gamepad .* connected' ~/benilla/benilla.log` should show one pad per connection.
 - The `realmName` empty at connect is a deploy issue (section 2), not a code regression. The proper fix (the baked state folder falling back when it is missing) is not in this beta. The new `config:` line is the check.
-- There is no rumble: nothing in benilla sends it.
+- There is no rumble: nothing in benilla plays it, and with `rumble` off (the default) gilrs plays no force feedback on any pad.
 - In the headset there is no d-pad and no Menu button (section 4). Hands tracking is off. The reference space is seated (`LOCAL`).
 - The Deck's GPU is the bottleneck in VR (section 4).
 - Part 2 ([ADR-47](/ADR/issues/ADR-47)) ran the tests green, with these gaps: the `reference` and `enforcer` gates need a `benilla-re` checkout and a WoW install; the `enforcer-no-install` gate fails without a display in `gates.sh` (it passes under Xvfb); `scripts/smoke.sh` needs a server and a window. Building with the nix-shell recipe takes Rust 1.99, which fails clippy on five upstream lines, where `rust-toolchain.toml` pins 1.98.1. Two tickets for those were proposed and not opened.
