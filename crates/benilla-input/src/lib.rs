@@ -43,7 +43,7 @@ mod trace;
 use std::collections::{BTreeSet, HashMap};
 
 use bevy::app::PluginGroupBuilder;
-use bevy::input::gamepad::RawGamepadEvent;
+use bevy::input::gamepad::{GamepadConnection, GamepadConnectionEvent, RawGamepadEvent};
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{MouseButtonInput, MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::input::{ButtonState, InputSystems};
@@ -276,12 +276,20 @@ struct Pushed {
 /// The raw events since last frame into [`PadDevice`], and its state out to [`PadState`].
 fn read_pad(
     mut raw: MessageReader<RawGamepadEvent>,
+    mut connections: MessageReader<GamepadConnectionEvent>,
     time: Res<Time<Real>>,
     mut device: ResMut<PadDevice>,
     mut state: ResMut<PadState>,
     trace: Res<Trace>,
 ) {
     let now = time.elapsed_secs();
+    // bevy_gilrs reports the pads already there at startup only as a `GamepadConnectionEvent`, and
+    // a hot-plugged one as that and a raw event. A disconnect is read in order from the raw stream.
+    for ev in connections.read() {
+        if matches!(ev.connection, GamepadConnection::Connected { .. }) {
+            device.handle(&RawGamepadEvent::Connection(ev.clone()), now);
+        }
+    }
     for ev in raw.read() {
         device.handle(ev, now);
     }
@@ -1483,6 +1491,41 @@ mod tests {
         app.update();
         assert!(bindings(&app).contains(&("PADDRIGHT", true)));
         assert_eq!(units(&app), "party2,");
+    }
+
+    /// A pad already there when the client starts: bevy_gilrs reports it in `PreStartup`, before
+    /// the first update, and only as a `GamepadConnectionEvent`. Its input plays.
+    #[test]
+    fn a_pad_connected_before_the_first_update_plays() {
+        use bevy::input::gamepad::RawGamepadButtonChangedEvent;
+        let mut app = App::new();
+        app.add_message::<RawGamepadEvent>()
+            .add_message::<GamepadConnectionEvent>()
+            .insert_resource(PadDevice::new(PadConfig::default()))
+            .init_resource::<PadState>()
+            .insert_resource(Trace(false))
+            .insert_resource(Time::<Real>::default())
+            .add_systems(PreUpdate, read_pad);
+        let pad = Entity::from_raw_u32(7).expect("a valid index");
+        app.world_mut().write_message(GamepadConnectionEvent::new(
+            pad,
+            GamepadConnection::Connected {
+                name: "Steam Virtual Gamepad".into(),
+                vendor_id: Some(0x28de),
+                product_id: Some(0x11ff),
+            },
+        ));
+        app.update();
+        assert!(app.world().resource::<PadDevice>().connected());
+        app.world_mut()
+            .write_message(RawGamepadEvent::Button(RawGamepadButtonChangedEvent::new(
+                pad,
+                GamepadButton::South,
+                1.0,
+            )));
+        app.update();
+        assert_eq!(app.world().resource::<PadDevice>().active(), Some(pad));
+        assert!(app.world().resource::<PadState>().is_down("PAD1"));
     }
 
     #[test]
